@@ -252,3 +252,64 @@ class TestRLTransitionBuilder:
 
         saved_path = builder.save_grpo_prompts(grpo_prompts, name="test_grpo_prompts")
         assert saved_path.endswith(".jsonl")
+
+        # Test in-memory Hugging Face Dataset conversion
+        hf_ds = builder.to_hf_dataset(grpo_prompts)
+        assert len(hf_ds) == 2
+        assert "prompt" in hf_ds.column_names
+        assert "benchmark_task_id" in hf_ds.column_names
+
+
+class TestTRLModernAPICompatibility:
+    def test_normalize_completion_text(self):
+        from learning.grpo import normalize_completion_text
+        
+        # 1. Plain string
+        assert normalize_completion_text("module test; endmodule") == "module test; endmodule"
+
+        # 2. Single message dict
+        assert normalize_completion_text({"content": "module test; endmodule"}) == "module test; endmodule"
+
+        # 3. Conversational message list (current TRL format)
+        trl_msg_list = [
+            {"role": "user", "content": "Write an ALU"},
+            {"role": "assistant", "content": "```systemverilog\nmodule alu; endmodule\n```"}
+        ]
+        norm = normalize_completion_text(trl_msg_list)
+        assert "module alu" in norm
+
+    def test_trl_conversational_completions_batch_evaluation(self, tmp_path):
+        """Test that evaluate_batch processes modern TRL conversational format and kwargs task routing."""
+        evaluator = HardwareRewardEvaluator(work_dir=str(tmp_path / "trl_eval"))
+
+        # Conversational completion objects returned by modern TRL generate loop
+        completions = [
+            [{"role": "assistant", "content": "```systemverilog\nmodule not_gate (input logic a, output logic y); assign y = ~a; endmodule\n```"}],
+            [{"role": "assistant", "content": "syntax error !!!"}],
+        ]
+        prompts = [
+            [{"role": "user", "content": "Design an inverter NOT gate [L1_NOT_GATE]"}],
+            [{"role": "user", "content": "Design an inverter NOT gate [L1_NOT_GATE]"}],
+        ]
+
+        # Extra dataset columns passed by TRL as kwargs:
+        rewards = evaluator.evaluate_batch(
+            completions,
+            prompts=prompts,
+            benchmark_task_id=["L1_NOT_GATE", "L1_NOT_GATE"],
+        )
+        assert len(rewards) == 2
+        assert rewards[0] > 0.5  # Valid SystemVerilog correctly extracted and verified
+        assert rewards[1] == 0.0  # Syntax error penalized
+
+    def test_curriculum_environment_factory(self, tmp_path):
+        from learning.grpo import make_curriculum_environment_factory
+        factory = make_curriculum_environment_factory(work_dir=str(tmp_path / "env_factory"))
+
+        env_not = factory(benchmark_task_id="L1_NOT_GATE")
+        assert env_not.target_module == "not_gate"
+        assert "L1_NOT_GATE" in env_not.task
+
+        env_alu = factory(benchmark_task_id="L2_ALU_4BIT")
+        assert env_alu.target_module == "alu"
+        assert "L2_ALU_4BIT" in env_alu.task

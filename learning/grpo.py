@@ -57,6 +57,40 @@ def compute_group_advantages(rewards: list[float], eps: float = 1e-4) -> list[fl
     return [(r - mean_r) / (std_r + eps) for r in rewards]
 
 
+def normalize_completion_text(completion: Any) -> str:
+    """Normalize TRL / conversational completions into plain text strings.
+    
+    Supports:
+    - Plain strings: "module mac ... endmodule"
+    - TRL conversational message lists: [{"role": "assistant", "content": "..."}]
+    - Single message dicts: {"content": "...", ...} or {"text": "..."}
+    - Nested message structures or token representations
+    """
+    if isinstance(completion, str):
+        return completion
+    if isinstance(completion, dict):
+        if "content" in completion:
+            return normalize_completion_text(completion["content"])
+        if "text" in completion:
+            return normalize_completion_text(completion["text"])
+        return str(completion)
+    if isinstance(completion, (list, tuple)):
+        parts = []
+        for item in completion:
+            if isinstance(item, dict):
+                content = item.get("content", "")
+                if content:
+                    parts.append(normalize_completion_text(content))
+                elif "text" in item:
+                    parts.append(normalize_completion_text(item["text"]))
+            elif isinstance(item, str):
+                parts.append(item)
+            else:
+                parts.append(str(item))
+        return "\n".join(parts)
+    return str(completion)
+
+
 class HardwareRewardEvaluator:
     """Evaluates candidate model completions using real hardware EDA tools.
     
@@ -103,9 +137,9 @@ class HardwareRewardEvaluator:
     def resolve_benchmark_task(
         self,
         task_id: Optional[str] = None,
-        prompt: Optional[str] = None,
-        code: Optional[str] = None,
-        completion: Optional[str] = None,
+        prompt: Optional[Any] = None,
+        code: Optional[Any] = None,
+        completion: Optional[Any] = None,
     ) -> Optional[Any]:
         """Dynamically resolve the benchmark task configuration from task_id, prompt, or RTL code."""
         try:
@@ -114,7 +148,8 @@ class HardwareRewardEvaluator:
         except Exception:
             return None
 
-        code_text = code or completion
+        prompt_str = normalize_completion_text(prompt) if prompt is not None else ""
+        code_text = normalize_completion_text(code or completion) if (code or completion) is not None else ""
 
         # 1. Direct task ID match
         if task_id:
@@ -164,25 +199,30 @@ class HardwareRewardEvaluator:
 
         return None
 
-    def extract_rtl(self, text: str) -> str:
-        """Extract SystemVerilog code from model completion output."""
+    def extract_rtl(self, text: Any) -> str:
+        """Extract SystemVerilog code from model completion output.
+        
+        Handles plain strings, TRL conversational message dicts, and message lists.
+        """
+        raw_text = normalize_completion_text(text)
+
         # 1. Look for ```systemverilog ... ``` block
-        sv_match = re.search(r"```(?:systemverilog|verilog)\s*\n(.*?)```", text, re.DOTALL | re.IGNORECASE)
+        sv_match = re.search(r"```(?:systemverilog|verilog)\s*\n(.*?)```", raw_text, re.DOTALL | re.IGNORECASE)
         if sv_match:
             return sv_match.group(1).strip()
 
         # 2. Look for generic ``` ... ``` block containing module
-        generic_match = re.search(r"```\s*\n(.*?)```", text, re.DOTALL)
+        generic_match = re.search(r"```\s*\n(.*?)```", raw_text, re.DOTALL)
         if generic_match and "module " in generic_match.group(1):
             return generic_match.group(1).strip()
 
         # 3. Direct module declaration
-        mod_match = re.search(r"(\bmodule\s+.*?\bendmodule\b)", text, re.DOTALL)
+        mod_match = re.search(r"(\bmodule\s+.*?\bendmodule\b)", raw_text, re.DOTALL)
         if mod_match:
             return mod_match.group(1).strip()
 
         # 4. JSON action containing 'code' in params
-        json_match = re.search(r'"code"\s*:\s*"([^"]+)"', text)
+        json_match = re.search(r'"code"\s*:\s*"([^"]+)"', raw_text)
         if json_match:
             return json_match.group(1).replace("\\n", "\n").replace('\\"', '"')
 
@@ -190,9 +230,9 @@ class HardwareRewardEvaluator:
 
     async def evaluate_completion_async(
         self,
-        completion: str,
+        completion: Any,
         benchmark_task_id: Optional[str] = None,
-        prompt: Optional[str] = None,
+        prompt: Optional[Any] = None,
         sub_work_dir: Optional[str] = None,
     ) -> dict[str, Any]:
         """Evaluate a single completion asynchronously using EDA tools for the resolved task."""
@@ -205,14 +245,16 @@ class HardwareRewardEvaluator:
                 "error": "No synthesizable SystemVerilog module found in completion.",
             }
 
+        prompt_str = normalize_completion_text(prompt) if prompt is not None else None
         # Resolve benchmark task dynamically (mixed curriculum support)
-        task_obj = self.resolve_benchmark_task(task_id=benchmark_task_id, prompt=prompt, code=code)
+        task_obj = self.resolve_benchmark_task(task_id=benchmark_task_id, prompt=prompt_str, code=code)
 
         top_module = getattr(task_obj, "top_module", self.default_top_module)
         formal_properties = getattr(task_obj, "formal_properties", self.default_formal_properties)
         test_file = self.default_test_file
 
-        cand_hash = hashlib.md5((completion + (task_obj.id if task_obj else "")).encode("utf-8")).hexdigest()[:8]
+        raw_completion = normalize_completion_text(completion)
+        cand_hash = hashlib.md5((raw_completion + (task_obj.id if task_obj else "")).encode("utf-8")).hexdigest()[:8]
         dir_name = sub_work_dir or f"cand_{cand_hash}"
         cand_dir = os.path.join(self.work_dir, dir_name)
         os.makedirs(cand_dir, exist_ok=True)
@@ -282,30 +324,74 @@ class HardwareRewardEvaluator:
             "top_module": top_module,
         }
 
-    def evaluate_completion(self, completion: str, benchmark_task_id: Optional[str] = None, prompt: Optional[str] = None) -> float:
+    def evaluate_completion(self, completion: Any, benchmark_task_id: Optional[str] = None, prompt: Optional[Any] = None) -> float:
         """Synchronous wrapper returning normalized reward in [0.0, 1.0]."""
         res = asyncio.run(self.evaluate_completion_async(completion, benchmark_task_id=benchmark_task_id, prompt=prompt))
         return float(res["reward"])
 
     async def evaluate_batch_async(
         self,
-        completions: list[str],
-        prompts: Optional[list[str]] = None,
-        task_ids: Optional[list[str]] = None,
+        completions: list[Any],
+        prompts: Optional[list[Any]] = None,
+        task_ids: Optional[list[str] | str] = None,
         **kwargs: Any,
     ) -> list[float]:
-        """Concurrently evaluate candidate completions in isolated sub-workspaces with bounded parallelism."""
+        """Concurrently evaluate candidate completions in isolated sub-workspaces with bounded parallelism.
+        
+        Fully compatible with Hugging Face TRL GRPOTrainer reward callback format:
+        - Completions can be plain strings or conversational message dicts: [{"content": "..."}]
+        - Prompts can be plain strings or message dicts
+        - Extra dataset columns (e.g. benchmark_task_id) passed via kwargs are routed to each candidate
+        """
         if not completions:
             return []
+
+        # Extract and align task IDs (from task_ids or dataset column kwargs)
+        raw_tids = (
+            task_ids
+            or kwargs.get("benchmark_task_id")
+            or kwargs.get("benchmark_id")
+            or kwargs.get("task_id")
+        )
+        resolved_tids: list[Optional[str]] = []
+        if isinstance(raw_tids, str):
+            resolved_tids = [raw_tids] * len(completions)
+        elif isinstance(raw_tids, (list, tuple)):
+            if len(raw_tids) == len(completions):
+                resolved_tids = [str(t) if t is not None else None for t in raw_tids]
+            elif len(raw_tids) > 0 and len(completions) % len(raw_tids) == 0:
+                # Repeated candidate generations per prompt (num_generations group size G)
+                group_ratio = len(completions) // len(raw_tids)
+                resolved_tids = [str(t) if t is not None else None for t in raw_tids for _ in range(group_ratio)]
+            else:
+                resolved_tids = [str(t) if t is not None else None for t in raw_tids]
+        else:
+            resolved_tids = [None] * len(completions)
+
+        # Extract and align prompts
+        raw_prompts = prompts if prompts is not None else kwargs.get("prompts")
+        resolved_prompts: list[Optional[str]] = []
+        if raw_prompts:
+            if len(raw_prompts) == len(completions):
+                resolved_prompts = [normalize_completion_text(p) for p in raw_prompts]
+            elif len(raw_prompts) > 0 and len(completions) % len(raw_prompts) == 0:
+                group_ratio = len(completions) // len(raw_prompts)
+                resolved_prompts = [normalize_completion_text(p) for p in raw_prompts for _ in range(group_ratio)]
+            else:
+                resolved_prompts = [normalize_completion_text(p) for p in raw_prompts]
+        else:
+            resolved_prompts = [None] * len(completions)
 
         concurrency = kwargs.get("max_concurrency") or self.max_concurrency
         sem = asyncio.Semaphore(concurrency)
 
-        async def _eval_one(completion: str, idx: int) -> float:
+        async def _eval_one(completion: Any, idx: int) -> float:
             async with sem:
-                pr = prompts[idx] if (prompts and idx < len(prompts)) else None
-                tid = task_ids[idx] if (task_ids and idx < len(task_ids)) else kwargs.get("benchmark_task_id")
-                sub_dir = f"worker_{idx}_{hashlib.md5(completion.encode('utf-8')).hexdigest()[:6]}"
+                pr = resolved_prompts[idx] if idx < len(resolved_prompts) else None
+                tid = resolved_tids[idx] if idx < len(resolved_tids) else None
+                raw_text = normalize_completion_text(completion)
+                cand_hash = hashlib.md5(raw_text.encode("utf-8")).hexdigest()[:6]
+                sub_dir = f"worker_{idx}_{cand_hash}"
                 res = await self.evaluate_completion_async(
                     completion,
                     benchmark_task_id=tid,
@@ -319,9 +405,9 @@ class HardwareRewardEvaluator:
 
     def evaluate_batch(
         self,
-        completions: list[str],
-        prompts: Optional[list[str]] = None,
-        task_ids: Optional[list[str]] = None,
+        completions: list[Any],
+        prompts: Optional[list[Any]] = None,
+        task_ids: Optional[list[str] | str] = None,
         **kwargs: Any,
     ) -> list[float]:
         """Synchronous wrapper for concurrent batch evaluation."""
@@ -360,8 +446,8 @@ class GRPOTrainer:
 
     def compute_step_advantages(
         self,
-        completions: list[str],
-        prompts: Optional[list[str]] = None,
+        completions: list[Any],
+        prompts: Optional[list[Any]] = None,
         task_id: Optional[str] = None,
     ) -> tuple[list[float], list[float]]:
         """Evaluate a group of candidate completions concurrently and compute their relative advantages.
@@ -374,11 +460,11 @@ class GRPOTrainer:
         return rewards, advantages
 
     async def train(self, dataset_path: str) -> dict[str, Any]:
-        """Run GRPO training on a hardware preference dataset.
+        """Run GRPO training on a hardware prompt dataset.
 
         Args:
-            dataset_path: Path to the preference dataset (JSONL with
-                          prompt, chosen, rejected fields)
+            dataset_path: Path to the prompt dataset (JSONL with 'prompt' column
+                          and optional 'benchmark_task_id' column)
 
         Returns:
             Training results dict
@@ -404,7 +490,8 @@ class GRPOTrainer:
             }
 
     def _run_training(self, dataset_path: str) -> dict[str, Any]:
-        """Execute GRPO training with real hardware reward evaluation."""
+        """Execute GRPO training with real hardware reward evaluation and modern TRL API."""
+        import inspect
         from datasets import load_dataset
         from peft import LoraConfig, TaskType
         from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -437,18 +524,33 @@ class GRPOTrainer:
         )
 
         # Genuine hardware evaluation reward function with task-aware routing
-        def hardware_reward_fn(completions: list[str], prompts: list[str] | None = None, **kwargs: Any) -> list[float]:
-            """Evaluate completions with real Verilator/Cocotb/Yosys EDA pipeline concurrently across curriculum tasks."""
+        def hardware_reward_fn(
+            completions: list[Any],
+            prompts: list[Any] | None = None,
+            **kwargs: Any,
+        ) -> list[float]:
+            """Evaluate completions with real Verilator/Cocotb/Yosys EDA pipeline concurrently across curriculum tasks.
+            
+            Handles both plain string completions and TRL conversational message dicts.
+            Routes extra dataset columns (e.g. benchmark_task_id) directly to the task evaluator.
+            """
             return self.evaluator.evaluate_batch(completions, prompts=prompts, **kwargs)
 
-        trainer = TRLGRPOTrainer(
-            model=model,
-            args=training_config,
-            train_dataset=dataset,
-            tokenizer=tokenizer,
-            reward_funcs=hardware_reward_fn,
-            peft_config=lora_config,
-        )
+        # Modern TRL compatibility: uses processing_class; fallback to tokenizer for older TRL versions
+        trainer_kwargs: dict[str, Any] = {
+            "model": model,
+            "args": training_config,
+            "train_dataset": dataset,
+            "reward_funcs": hardware_reward_fn,
+            "peft_config": lora_config,
+        }
+        sig = inspect.signature(TRLGRPOTrainer.__init__)
+        if "processing_class" in sig.parameters:
+            trainer_kwargs["processing_class"] = tokenizer
+        else:
+            trainer_kwargs["tokenizer"] = tokenizer
+
+        trainer = TRLGRPOTrainer(**trainer_kwargs)
 
         result = trainer.train()
         trainer.save_model(self.output_dir)
@@ -459,3 +561,25 @@ class GRPOTrainer:
             "output_dir": self.output_dir,
             "reward_type": "grounded_hardware_eda",
         }
+
+
+def make_curriculum_environment_factory(
+    work_dir: Optional[str] = None,
+    default_benchmark_task_id: Optional[str] = None,
+):
+    """Create an environment factory compatible with TRL's environment-oriented GRPO rollout pattern.
+    
+    Returns a callable that instantiates HardwareDesignEnv dynamically for each dataset row,
+    allowing multi-environment training across the curriculum benchmarks.
+    """
+    from learning.environment import HardwareDesignEnv
+
+    def environment_factory(benchmark_task_id: Optional[str] = None, **kwargs: Any) -> HardwareDesignEnv:
+        target_id = benchmark_task_id or default_benchmark_task_id
+        return HardwareDesignEnv(
+            work_dir=work_dir,
+            benchmark_task_id=target_id,
+            **kwargs,
+        )
+
+    return environment_factory

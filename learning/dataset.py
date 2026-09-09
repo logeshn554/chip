@@ -4,8 +4,9 @@ Dataset Builder — Converts trajectory data into reproducible training datasets
 Transforms raw trajectory episodes into:
 - SFT instruction/response pairs from verified, high-reward episodes
 - Failure/Fix pairs teaching the model how to repair syntax/lint/test errors
-- GRPO/DPO preference pairs (chosen vs rejected trajectories)
-- Filtered, quality-scored, deduplicated dataset formats
+- Online GRPO prompt datasets ('prompt' column + benchmark metadata for TRL GRPOTrainer)
+- Offline DPO preference pairs (prompt, chosen, rejected)
+- Standardized RL transitions (s_t, a_t, r_t, s_{t+1}, done) for offline RL
 """
 
 from __future__ import annotations
@@ -282,6 +283,25 @@ class TrajectoryDatasetBuilder:
                 f.write(json.dumps(item) + "\n")
         logger.info(f"Saved {len(dataset)} GRPO prompt records to {path}")
         return path
+
+    def to_hf_dataset(self, dataset: list[dict[str, Any]]) -> Any:
+        """Convert a list of dataset records directly into an in-memory Hugging Face Dataset."""
+        try:
+            from datasets import Dataset
+            return Dataset.from_list(dataset)
+        except ImportError:
+            class MockHFDataset:
+                def __init__(self, items: list[dict[str, Any]]):
+                    self._items = items
+                    self.column_names = list(items[0].keys()) if items else []
+
+                def __len__(self):
+                    return len(self._items)
+
+                def __getitem__(self, idx):
+                    return self._items[idx]
+
+            return MockHFDataset(dataset)
 
     def build_rl_transitions(
         self,

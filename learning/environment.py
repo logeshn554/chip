@@ -514,3 +514,23 @@ class QwenHardwareDesignPolicy:
             return {"action": "SYNTHESIZE", "params": {}}
         else:
             return {"action": "COMPLETE", "params": {}}
+
+
+def make_curriculum_environment_factory(
+    work_dir: Optional[str] = None,
+    default_benchmark_task_id: Optional[str] = None,
+):
+    """Factory creating HardwareDesignEnv instances for TRL environment-oriented GRPO.
+    
+    Supports multi-environment routing across curriculum benchmarks based on
+    dataset row columns (e.g. 'benchmark_task_id' or 'task').
+    """
+    def environment_factory(benchmark_task_id: Optional[str] = None, **kwargs: Any) -> HardwareDesignEnv:
+        target_id = benchmark_task_id or default_benchmark_task_id
+        return HardwareDesignEnv(
+            work_dir=work_dir,
+            benchmark_task_id=target_id,
+            **kwargs,
+        )
+
+    return environment_factory
