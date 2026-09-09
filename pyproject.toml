@@ -37,6 +37,7 @@ dependencies = [
     "rich>=13.7.0",
     "click>=8.1.0",
     "python-dotenv>=1.0.0",
+    "scrapegraphai>=1.8.0",
 ]
 
 [project.optional-dependencies]
@@ -57,7 +58,19 @@ dev = [
 chip-agent = "main:cli"
 
 [tool.setuptools.packages.find]
-include = ["agent*", "memory*", "web*", "rtl*", "tools*", "evaluator*", "learning*"]
+include = [
+    "agent*",
+    "memory*",
+    "web*",
+    "rtl*",
+    "tools*",
+    "evaluator*",
+    "learning*",
+    "scraping*",
+    "llm*",
+    "benchmarks*",
+]
+
 
 [build-system]
 requires = ["setuptools>=70.0"]

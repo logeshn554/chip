@@ -1,30 +1,28 @@
 """
-Dataset Builder — converts trajectory data into training formats.
+Dataset Builder — Converts trajectory data into reproducible training datasets.
 
-Transforms raw trajectory episodes into SFT instruction/response pairs
-and GRPO/DPO preference pairs for fine-tuning Qwen3-4B.
+Transforms raw trajectory episodes into:
+- SFT instruction/response pairs from verified, high-reward episodes
+- Failure/Fix pairs teaching the model how to repair syntax/lint/test errors
+- GRPO/DPO preference pairs (chosen vs rejected trajectories)
+- Filtered, quality-scored, deduplicated dataset formats
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
-from typing import Any
+from typing import Any, Optional
 
-from agent.schemas import Episode
+from agent.schemas import Episode, TrajectoryStep
 
 logger = logging.getLogger(__name__)
 
 
 class TrajectoryDatasetBuilder:
-    """Builds training datasets from stored trajectories.
-
-    Supports:
-    - SFT: instruction/response pairs from successful episodes
-    - GRPO/DPO: preference pairs (better vs worse trajectories)
-    - Filtering by reward threshold
-    """
+    """Builds reproducible training datasets from stored trajectories."""
 
     def __init__(
         self,
@@ -35,31 +33,51 @@ class TrajectoryDatasetBuilder:
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
 
+    def filter_trajectories(
+        self,
+        episodes: list[Episode],
+        min_reward: float = 0.7,
+        require_success: bool = True,
+        deduplicate: bool = True,
+    ) -> list[Episode]:
+        """Filter episodes by quality score and deduplicate.
+
+        Args:
+            episodes: Input list of episodes
+            min_reward: Minimum final reward threshold
+            require_success: Whether episode must be flagged success
+            deduplicate: Filter out identical trajectories
+        """
+        filtered = []
+        seen_hashes = set()
+
+        for ep in episodes:
+            if ep.final_reward < min_reward:
+                continue
+            if require_success and not ep.success:
+                continue
+
+            if deduplicate:
+                # Hash task + action sequence
+                action_seq = "-".join(s.action for s in ep.steps)
+                h = hashlib.sha256(f"{ep.task}|{action_seq}".encode("utf-8")).hexdigest()
+                if h in seen_hashes:
+                    continue
+                seen_hashes.add(h)
+
+            filtered.append(ep)
+
+        logger.info(f"Filtered {len(episodes)} episodes down to {len(filtered)} high-quality episodes.")
+        return filtered
+
     def build_sft_dataset(
         self,
         episodes: list[Episode],
         min_reward: float = 0.7,
-    ) -> list[dict[str, str]]:
-        """Build SFT dataset from successful trajectory episodes.
-
-        Converts each successful episode step into an instruction/response pair:
-        - Instruction = state + context
-        - Response = action + params that led to reward
-
-        Args:
-            episodes: List of trajectory episodes
-            min_reward: Minimum episode reward to include
-
-        Returns:
-            List of {"instruction": ..., "response": ...} dicts
-        """
+    ) -> list[dict[str, Any]]:
+        """Build SFT dataset from successful trajectory episodes."""
+        filtered = self.filter_trajectories(episodes, min_reward=min_reward, require_success=True)
         dataset = []
-
-        filtered = [e for e in episodes if e.final_reward >= min_reward and e.success]
-        logger.info(
-            f"Building SFT dataset: {len(filtered)}/{len(episodes)} episodes "
-            f"(reward >= {min_reward})"
-        )
 
         for episode in filtered:
             for step in episode.steps:
@@ -68,42 +86,73 @@ class TrajectoryDatasetBuilder:
                     f"Current State: {step.state_summary}\n"
                     f"What action should you take next?"
                 )
-
                 response = json.dumps({
-                    "thinking": f"Based on the current state, I should {step.action.lower()}.",
+                    "thinking": f"Based on the hardware requirements, I should execute {step.action}.",
                     "action": step.action,
                     "params": step.action_params,
-                })
+                }, indent=2)
 
                 dataset.append({
                     "instruction": instruction,
                     "response": response,
                     "reward": step.reward,
                     "episode_id": episode.episode_id,
+                    "step_index": step.step_index,
                 })
 
         logger.info(f"Built SFT dataset: {len(dataset)} examples")
         return dataset
 
+    def build_failure_fix_pairs(
+        self,
+        episodes: list[Episode],
+    ) -> list[dict[str, Any]]:
+        """Extract failure and successful repair pairs from trajectories.
+
+        Teaches the model: when encountering error X, produce repair Y.
+        """
+        pairs = []
+
+        for ep in episodes:
+            for i in range(len(ep.steps) - 1):
+                curr = ep.steps[i]
+                nxt = ep.steps[i + 1]
+
+                # If current step encountered an error and next step repaired it
+                has_error = "error" in curr.observation.lower() or curr.reward < 0
+                next_success = nxt.reward > 0 or "passed" in nxt.observation.lower()
+
+                if has_error and next_success:
+                    instruction = (
+                        f"Task: {ep.task}\n"
+                        f"Failed Action: {curr.action}\n"
+                        f"Error Observed: {curr.observation}\n"
+                        f"How do you repair this failure?"
+                    )
+                    response = json.dumps({
+                        "thinking": "Analyzing failure and proposing corrective action.",
+                        "action": nxt.action,
+                        "params": nxt.action_params,
+                    }, indent=2)
+
+                    pairs.append({
+                        "instruction": instruction,
+                        "response": response,
+                        "episode_id": ep.episode_id,
+                        "error_stage": curr.action,
+                    })
+
+        logger.info(f"Built failure/fix dataset: {len(pairs)} pairs")
+        return pairs
+
     def build_preference_dataset(
         self,
         episodes: list[Episode],
     ) -> list[dict[str, Any]]:
-        """Build preference dataset for GRPO/DPO training.
-
-        Pairs higher-reward episodes against lower-reward episodes
-        for the same or similar tasks.
-
-        Args:
-            episodes: List of trajectory episodes
-
-        Returns:
-            List of {"prompt": ..., "chosen": ..., "rejected": ...} dicts
-        """
-        # Group episodes by task similarity (simple: exact match)
+        """Build preference dataset for GRPO/DPO training."""
         task_groups: dict[str, list[Episode]] = {}
         for ep in episodes:
-            key = ep.task[:100]  # Simple grouping key
+            key = ep.task.strip().lower()[:80]
             task_groups.setdefault(key, []).append(ep)
 
         dataset = []
@@ -112,11 +161,9 @@ class TrajectoryDatasetBuilder:
             if len(group) < 2:
                 continue
 
-            # Sort by reward
             sorted_eps = sorted(group, key=lambda e: e.final_reward, reverse=True)
 
-            # Pair best with worst
-            for i in range(min(len(sorted_eps) // 2, 10)):
+            for i in range(min(len(sorted_eps) // 2, 5)):
                 better = sorted_eps[i]
                 worse = sorted_eps[-(i + 1)]
 
@@ -144,18 +191,8 @@ class TrajectoryDatasetBuilder:
         name: str = "sft_dataset",
         format: str = "jsonl",
     ) -> str:
-        """Save a dataset to disk.
-
-        Args:
-            dataset: List of training examples
-            name: Dataset name
-            format: "jsonl" or "json"
-
-        Returns:
-            Path to the saved file
-        """
+        """Save a dataset to disk."""
         filepath = os.path.join(self.output_dir, f"{name}.{format}")
-
         if format == "jsonl":
             with open(filepath, "w", encoding="utf-8") as f:
                 for entry in dataset:

@@ -21,12 +21,12 @@ class TestActionRouter:
     def test_parse_unknown_action(self):
         router = ActionRouter()
         action = router.parse_action({"action": "UNKNOWN_ACTION"})
-        assert action.action_type == ActionType.COMPLETE
+        assert action.action_type == ActionType.UNKNOWN
 
     def test_parse_missing_action(self):
         router = ActionRouter()
         action = router.parse_action({})
-        assert action.action_type == ActionType.COMPLETE
+        assert action.action_type == ActionType.UNKNOWN
 
     @pytest.mark.asyncio
     async def test_execute_complete(self):

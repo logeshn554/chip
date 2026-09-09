@@ -76,4 +76,6 @@ class WebResearchTool:
             "citation_id": ctx.citation_id,
             "compact_context": ctx.to_prompt_text(),
             "token_count": ctx.token_count,
+            "research_record": ctx.to_research_record(),
         }
+

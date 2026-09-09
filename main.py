@@ -140,7 +140,7 @@ async def _run_agent(task: str, config: dict, prompts: dict):
         planner=planner,
         router=router,
         memory=memory,
-        evaluator=None,  # TODO: Wire up full evaluator
+        evaluator=reward_engine,
         trajectory_store=trajectory_store,
         config=config.get("agent", {}),
     )
@@ -225,10 +225,10 @@ def status(ctx):
 
     # Check tools
     import shutil
-    for tool in ["verilator", "yosys", "make", "git"]:
+    for tool in ["verilator", "yosys", "sby", "make", "git"]:
         found = shutil.which(tool)
-        icon = "✓" if found else "✗"
-        color = "green" if found else "red"
+        icon = "[OK]" if found else "[--]"
+        color = "green" if found else "yellow"
         console.print(f"  [{color}]{icon}[/] {tool}: {found or 'not found'}")
 
     # Check memory

@@ -20,9 +20,7 @@ venv/
 env/
 
 # Runtime Database & Chroma Vector Storage
-data/chroma/
-data/cache/
-data/downloads/
+data/
 
 # EDA simulation and synthesis build artifacts
 sim_build/

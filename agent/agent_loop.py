@@ -130,14 +130,15 @@ class AgentLoop:
             # 3d. Record the step
             step_reward = 0.0
             if result.status == ActionStatus.SUCCESS:
-                console.print(f"  [green]✓ Success[/]")
+                console.print(f"  [green][OK] Success[/]")
                 retries = 0
             elif result.status == ActionStatus.FAILURE:
-                console.print(f"  [red]✗ Failed: {result.output[:200]}[/]")
+                console.print(f"  [red][FAIL] Failed: {result.output[:200]}[/]")
                 retries += 1
             else:
-                console.print(f"  [yellow]⚠ {result.status.value}: {result.output[:200]}[/]")
+                console.print(f"  [yellow][WARN] {result.status.value}: {result.output[:200]}[/]")
                 retries += 1
+
 
             # 3e. Stage-driven Evaluation: evaluate upon design generation, simulation, synthesis, or optimization
             should_evaluate = bool(

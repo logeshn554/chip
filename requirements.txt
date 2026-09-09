@@ -1,13 +1,23 @@
-# Self-Evolving Hardware Design Agent Requirements
+# Core Requirements for Self-Evolving Hardware Design Agent
 chromadb>=0.4.0
 cocotb>=1.8.0
 pydantic>=2.0.0
 beautifulsoup4>=4.12.0
+httpx>=0.27.0
 lxml>=4.9.0
 pyyaml>=6.0.0
+rich>=13.7.0
+click>=8.1.0
+python-dotenv>=1.0.0
+jinja2>=3.1.0
+GitPython>=3.1.0
+
+# Testing
 pytest>=7.0.0
 pytest-asyncio>=0.21.0
-GitPython>=3.1.0
 
 # Targeted Web Research
 scrapegraphai>=1.8.0
+
+# Optional Learning Dependencies:
+# pip install trl peft datasets bitsandbytes

@@ -4,17 +4,20 @@
 
 # ── LLM ──────────────────────────────────────
 llm:
-  # "transformers" for local HF inference, "vllm" for OpenAI-compatible API
-  backend: "transformers"
-  model_name: "Qwen/Qwen3-4B"
+  # "ollama" for local REST inference, "transformers" for local HF, "vllm" for OpenAI-compatible API
+  backend: "ollama"
+  model_name: "qwen2.5-coder:3b"
   device_map: "auto"
   torch_dtype: "auto"
   max_new_tokens: 8192
-  temperature: 0.7
+  temperature: 0.2
   top_p: 0.9
   enable_thinking: true
+  timeout_seconds: 60.0
 
-  # vLLM-specific settings (used when backend == "vllm")
+  ollama:
+    base_url: "http://localhost:11434"
+
   vllm:
     base_url: "http://localhost:8000/v1"
     api_key: "EMPTY"
@@ -25,40 +28,50 @@ memory:
   embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
 
   knowledge:
-    collection: "knowledge"
+    collection: "hardware_knowledge"
     chunk_size: 512
     chunk_overlap: 64
 
   experience:
-    collection: "experience"
+    collection: "hardware_experience"
     max_results: 10
 
   design:
-    collection: "designs"
+    collection: "hardware_designs"
     designs_dir: "./designs"
 
   trajectory:
     store_dir: "./trajectories"
     format: "jsonl"
 
-# ── Web Research ─────────────────────────────
+# ── Web Research & ScrapeGraphAI ─────────────
 web:
-  search_backend: "duckduckgo"    # "duckduckgo" | "serper" | "tavily"
-  max_results: 10
+  enabled: true
+  search_backend: "targeted_research"
+  scraper: "scrapegraphai"
+  max_results: 5
   allowed_domains:
     - "arxiv.org"
     - "github.com"
     - "docs.cocotb.org"
     - "verilator.org"
     - "yosyshq.readthedocs.io"
+    - "riscv.org"
+    - "ieee.org"
     - "en.wikipedia.org"
-    - "stackoverflow.com"
   rate_limit_seconds: 2.0
+  cache_enabled: true
   cache_dir: "./data/web_cache"
+  timeout_seconds: 15.0
 
-# ── EDA Tools ────────────────────────────────
+scraping:
+  max_page_bytes: 250000
+  max_extract_tokens: 1500
+  injection_filter_enabled: true
+  deduplication_threshold: 0.75
+
+# ── EDA Tools & Verification ─────────────────
 tools:
-  # Set to "wsl" if tools run inside WSL2 on Windows
   execution_env: "native"    # "native" | "wsl"
 
   verilator:
@@ -71,46 +84,71 @@ tools:
     sim_build_dir: "./sim_build"
     simulator: "verilator"
     log_level: "INFO"
+    timeout_seconds: 60
 
   yosys:
     binary: "yosys"
     default_target: "generic"     # "generic" | "ice40" | "ecp5" | "xilinx"
-    timeout_seconds: 300
+    timeout_seconds: 120
+
+  formal:
+    binary: "sby"
+    default_engine: "smtbmc"
+    bmc_depth: 20
+    timeout_seconds: 60
 
   git:
     designs_repo: "./designs"
     auto_commit: true
     tag_on_success: true
 
-# ── Evaluator ────────────────────────────────
+# ── Evaluator & Modular Reward ───────────────
 evaluator:
-  # Reward weights (must sum to 1.0)
+  mode: "modular"                 # "v1" | "modular"
+  # Modular weights (sum to 1.0)
   reward_weights:
-    correctness: 0.5
-    area: 0.2
-    timing: 0.2
-    power: 0.1
+    correctness: 0.45             # compile + test pass rate
+    formal: 0.15                  # formal verification pass
+    area: 0.20                    # cell count / area score
+    timing: 0.15                  # critical path ns
+    power: 0.05                   # power estimate (only when reliable)
 
-  # Thresholds for "pass"
+  # Thresholds for gates
   thresholds:
-    compile: true                # must compile
+    compile_required: true        # hard gate: compile must pass
+    functional_pass_min: 1.0      # hard gate: 100% functional tests required
     lint_warnings_max: 5
-    test_pass_rate_min: 0.95     # 95% of tests must pass
-    area_max: 100000             # max cell count
-    timing_ns_max: 10.0          # max critical path (ns)
+    area_target: 500.0            # um^2
+    timing_target_ns: 5.0         # ns
 
-  # Phase controls which reward components are active
-  reward_phase: 1                # 1 = correctness only, 2 = + synthesis
+  reward_phase: 1                 # 1 = correctness only, 2 = + synthesis
+
+# ── Security & Sandboxing ────────────────────
+security:
+  workspace_only: true
+  allowed_write_directories:
+    - "./designs"
+    - "./rtl/generated"
+    - "./sim_build"
+    - "./trajectories"
+  protected_directories:
+    - "evaluator"
+    - "configs"
+    - "tests"
+    - "benchmarks/tests"
+  allow_arbitrary_shell: false
+  subprocess_timeout_seconds: 60
 
 # ── Agent Loop ───────────────────────────────
 agent:
-  max_iterations: 50
+  max_iterations: 25
   max_retries_per_step: 3
   early_stop_reward: 0.95
   log_level: "INFO"
   save_all_trajectories: true
+  work_dir: "./rtl/generated"
 
-# ── Learning ─────────────────────────────────
+# ── Learning Foundation (SFT / GRPO) ─────────
 learning:
   min_episodes_for_sft: 100
   reward_threshold_for_sft: 0.7
@@ -120,7 +158,9 @@ learning:
     lora_r: 16
     lora_alpha: 32
     batch_size: 4
+    output_dir: "./models/sft"
   grpo:
     group_size: 4
     learning_rate: 1.0e-5
     kl_coeff: 0.1
+    output_dir: "./models/grpo"

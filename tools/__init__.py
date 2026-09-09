@@ -5,6 +5,7 @@ from tools.memory_search import MemorySearchTool, MemorySearchArgs
 from tools.verilator import VerilatorTool
 from tools.cocotb import CocotbTool
 from tools.yosys import YosysTool
+from tools.formal import FormalVerificationTool
 from tools.git import GitTool
 
 __all__ = [
@@ -15,5 +16,7 @@ __all__ = [
     "VerilatorTool",
     "CocotbTool",
     "YosysTool",
+    "FormalVerificationTool",
     "GitTool",
 ]
+

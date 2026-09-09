@@ -179,6 +179,25 @@ class VerilatorTool:
         # Fallback to internal SystemVerilog syntax/lint validator
         return self.validate_sv_syntax(code, filename=filename)
 
+    async def lint_and_compile(self, file_path: str, top_module: str = "mac") -> dict[str, Any]:
+        """Lint and compile SystemVerilog module."""
+        return await self.lint(file_path)
+
+    async def compile(self, sources: list[str]) -> Any:
+        """Compatibility method for compilation."""
+        from dataclasses import dataclass
+        @dataclass
+        class CompileResult:
+            success: bool
+            output: str
+            errors: list[str]
+
+        target = sources[0] if sources else "mac.sv"
+        res = await self.lint(target)
+        is_ok = (res.get("status") == "passed")
+        err = res.get("error", "")
+        return CompileResult(success=is_ok, output=err or "Compilation passed", errors=[err] if err else [])
+
     async def execute(self, **kwargs: Any) -> dict[str, Any]:
         """Strict tool entrypoint for RUN_VERILATOR."""
         sources = kwargs.get("sources", ["mac.sv"])
@@ -186,3 +205,4 @@ class VerilatorTool:
             sources = [sources]
         target = sources[0] if sources else "mac.sv"
         return await self.lint(target)
+

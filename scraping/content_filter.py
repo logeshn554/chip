@@ -28,9 +28,10 @@ PROMPT_INJECTION_PATTERNS = [
 class ContentFilter:
     """Filters raw HTML/Markdown into compact, sanitized technical context."""
 
-    def __init__(self, max_tokens: int = 1500, max_chars: int = 6000):
-        self.max_tokens = max_tokens
+    def __init__(self, max_tokens: int = 1500, max_chars: int = 6000, max_length: Optional[int] = None):
+        self.max_tokens = max_length if max_length is not None else max_tokens
         self.max_chars = max_chars
+
 
     def sanitize_text(self, text: str) -> str:
         """Strip potential prompt injection attacks from untrusted external text."""
