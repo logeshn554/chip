@@ -50,6 +50,7 @@ from tools.yosys import YosysTool
 from tools.formal import FormalVerificationTool
 from memory.knowledge_store import KnowledgeStore
 from memory.design_store import DesignStore
+from scraping.scrapegraph_adapter import ScrapeGraphAdapter
 
 import string
 import numpy as np
@@ -122,6 +123,7 @@ class HardwareDesignEnv(gym.Env):
                 "best_reward": spaces.Box(low=0.0, high=1.0, shape=(), dtype=np.float32),
                 "current_reward": spaces.Box(low=0.0, high=1.0, shape=(), dtype=np.float32),
                 "status": spaces.Text(max_length=50, min_length=0, charset=PRINTABLE_CHARSET),
+                "retrieved_context": spaces.Text(max_length=2000, min_length=0, charset=PRINTABLE_CHARSET),
             })
         else:
             self.action_space = len(self.ACTION_SPACE)
@@ -135,6 +137,7 @@ class HardwareDesignEnv(gym.Env):
         self.reward_engine = RewardEngine()
         self.knowledge = KnowledgeStore()
         self.design_store = DesignStore()
+        self.scrapegraph = ScrapeGraphAdapter(cache_dir=os.path.join(work_dir, "web_cache"))
 
         # State variables
         self.current_step = 0
@@ -143,6 +146,7 @@ class HardwareDesignEnv(gym.Env):
         self.best_design_quality = 0.0     # Best hardware quality in [0.0, 1.0]
         self.current_rtl_path: Optional[str] = None
         self.last_error: str = ""
+        self.last_retrieved_context: str = ""
         self.is_done = False
         self.compile_passed = False
         self.functional_passed = False
@@ -165,6 +169,7 @@ class HardwareDesignEnv(gym.Env):
         self.current_design_quality = 0.0
         self.best_design_quality = 0.0
         self.last_error = ""
+        self.last_retrieved_context = ""
         self.is_done = False
         self.compile_passed = False
         self.functional_passed = False
@@ -189,6 +194,7 @@ class HardwareDesignEnv(gym.Env):
             "best_reward": np.array(0.0, dtype=np.float32),
             "current_reward": np.array(0.0, dtype=np.float32),
             "status": "ready",
+            "retrieved_context": "",
         }
         info = {
             "task": self.task,
@@ -227,7 +233,7 @@ class HardwareDesignEnv(gym.Env):
             params = action.get("params", {})
 
         step_reward = -0.01  # Small step execution cost to encourage efficiency
-        info: dict[str, Any] = {"action": action_name, "step": self.current_step}
+        info: dict[str, Any] = {"action": action_name, "action_executed": action_name, "step": self.current_step}
 
         # ── Handle Actions ───────────────────────────────────────────
         if action_name in ["GENERATE_RTL", "EDIT_RTL"]:
@@ -325,9 +331,36 @@ class HardwareDesignEnv(gym.Env):
                     self.last_error = "Formal assertion violation detected."
                 info["formal_status"] = status
 
-        elif action_name in ["RETRIEVE_MEMORY", "SEARCH_WEB"]:
-            step_reward = 0.02  # Slight exploration reward
-            info["query"] = params.get("query", self.task)
+        elif action_name == "RETRIEVE_MEMORY":
+            query = str(params.get("query") or self.task)
+            chunks = self.knowledge.query(query, n_results=2)
+            if chunks:
+                retrieved_summary = "\n".join([f"[{c.get('title', 'Knowledge')}]: {c.get('content', '')}" for c in chunks])
+                self.last_retrieved_context = retrieved_summary[:1800]
+                step_reward = 0.05  # Positive exploration reward conditioned on finding technical knowledge
+                info["status"] = "memory_retrieved"
+                info["chunks_found"] = len(chunks)
+            else:
+                self.last_retrieved_context = ""
+                step_reward = 0.0
+                info["status"] = "no_memory_found"
+                info["chunks_found"] = 0
+            info["retrieved_context"] = self.last_retrieved_context
+
+        elif action_name == "SEARCH_WEB":
+            query = str(params.get("query") or self.task)
+            url = str(params.get("url") or "https://github.com/verilator/verilator")
+            ctx = await self.scrapegraph.extract_compact_context(url=url, focused_query=query)
+            if ctx.extracted_summary and "Unable to retrieve" not in ctx.extracted_summary:
+                self.last_retrieved_context = ctx.to_prompt_text()[:1800]
+                step_reward = 0.05  # Positive exploration reward conditioned on useful research
+                info["status"] = "web_research_retrieved"
+                info["citation_id"] = ctx.citation_id
+            else:
+                self.last_retrieved_context = ""
+                step_reward = 0.0
+                info["status"] = "empty_research"
+            info["retrieved_context"] = self.last_retrieved_context
 
         elif action_name == "COMPLETE":
             self.is_done = True
@@ -380,6 +413,7 @@ class HardwareDesignEnv(gym.Env):
             "best_reward": np.array(self.best_design_quality, dtype=np.float32),
             "current_reward": np.array(self.current_design_quality, dtype=np.float32),
             "status": "done" if (terminated or truncated) else "in_progress",
+            "retrieved_context": self.last_retrieved_context[:2000],
         }
 
         info["episode_return"] = round(self.episode_return, 4)
@@ -423,13 +457,13 @@ class HardwareVectorObservationWrapper(gym.ObservationWrapper if HAS_GYMNASIUM e
             self.observation_space = spaces.Box(
                 low=0.0,
                 high=1.0,
-                shape=(10,),
+                shape=(11,),
                 dtype=np.float32,
             )
 
     def observation(self, obs: dict[str, Any]) -> np.ndarray:
         raw_env = getattr(self.env, "unwrapped", self.env)
-        vec = np.zeros(10, dtype=np.float32)
+        vec = np.zeros(11, dtype=np.float32)
         vec[0] = float(obs.get("step", 0)) / max(1.0, float(getattr(raw_env, "max_steps", 15)))
         vec[1] = float(obs.get("best_reward", 0.0))
         vec[2] = float(obs.get("current_reward", 0.0))
@@ -441,6 +475,7 @@ class HardwareVectorObservationWrapper(gym.ObservationWrapper if HAS_GYMNASIUM e
         vec[7] = 1.0 if len(rtl.strip()) > 0 else 0.0
         vec[8] = min(1.0, len(rtl) / 2000.0)
         vec[9] = 1.0 if len(str(obs.get("last_error", "")).strip()) > 0 else 0.0
+        vec[10] = 1.0 if len(str(obs.get("retrieved_context", "")).strip()) > 0 else 0.0
         return vec
 
 

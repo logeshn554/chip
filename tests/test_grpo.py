@@ -90,6 +90,61 @@ endmodule
         assert len(advantages) == 2
         assert all(r == 0.0 for r in rewards)
 
+    def test_dynamic_benchmark_resolution(self):
+        evaluator = HardwareRewardEvaluator()
+        
+        # Resolve by benchmark_task_id
+        task_not = evaluator.resolve_benchmark_task(task_id="L1_NOT_GATE")
+        assert task_not is not None
+        assert task_not.top_module == "not_gate"
+        assert len(task_not.public_test_cases) > 0
+
+        # Resolve by prompt keyword
+        task_alu = evaluator.resolve_benchmark_task(prompt="Implement the 4-bit ALU benchmark L2_ALU_4BIT")
+        assert task_alu is not None
+        assert task_alu.top_module == "alu"
+
+        # Resolve by module name in completion
+        task_mux = evaluator.resolve_benchmark_task(completion="module mux_2to1 (input logic d0, d1, sel, output logic y); assign y = sel ? d1 : d0; endmodule")
+        assert task_mux is not None
+        assert task_mux.task_id == "L1_MUX2TO1"
+
+    def test_evaluator_evaluate_non_mac_benchmark(self, tmp_path):
+        evaluator = HardwareRewardEvaluator(
+            work_dir=str(tmp_path / "grpo_not_gate"),
+        )
+        not_gate_completion = """
+```systemverilog
+`timescale 1ns / 1ps
+module not_gate (
+    input  logic a,
+    output logic y
+);
+    assign y = ~a;
+endmodule
+```
+"""
+        # Grounded hardware evaluation for Level 1 NOT gate
+        reward = evaluator.evaluate_completion(not_gate_completion, benchmark_task_id="L1_NOT_GATE")
+        assert reward > 0.5
+
+    def test_parallel_batch_evaluation(self, tmp_path):
+        evaluator = HardwareRewardEvaluator(
+            work_dir=str(tmp_path / "grpo_parallel"),
+            max_concurrency=4,
+        )
+        valid_not = "module not_gate (input logic a, output logic y); assign y = ~a; endmodule"
+        invalid_not = "module not_gate (syntax error !!!"
+        completions = [valid_not, invalid_not, valid_not]
+        prompts = ["Design L1_NOT_GATE", "Design L1_NOT_GATE", "Design L1_NOT_GATE"]
+
+        # Run parallel batch evaluation
+        rewards = evaluator.evaluate_batch(completions, prompts=prompts, max_concurrency=2)
+        assert len(rewards) == 3
+        assert rewards[0] > 0.5
+        assert rewards[1] == 0.0
+        assert rewards[2] > 0.5
+
 
 class TestRLTransitionBuilder:
     def test_build_rl_transitions(self, tmp_path):
@@ -148,3 +203,52 @@ class TestRLTransitionBuilder:
         # Check export
         saved_file = builder.save_rl_transitions(transitions, name="test_transitions")
         assert saved_file.endswith(".jsonl")
+
+    def test_build_grpo_prompt_dataset(self, tmp_path):
+        builder = TrajectoryDatasetBuilder(output_dir=str(tmp_path / "data"))
+        episodes = [
+            Episode(
+                episode_id="ep_not_01",
+                task="Design an inverter NOT gate [L1_NOT_GATE].",
+                metadata={"benchmark_task_id": "L1_NOT_GATE", "top_module": "not_gate"},
+                steps=[
+                    TrajectoryStep(
+                        step_index=0,
+                        state_summary="rtl generation",
+                        action="GENERATE_RTL",
+                        action_params={"code": "module not_gate (input a, output y); assign y = ~a; endmodule"},
+                        reward=1.0,
+                    )
+                ],
+                final_reward=1.0,
+                episode_return=1.0,
+                success=True,
+            ),
+            Episode(
+                episode_id="ep_alu_01",
+                task="Design a 4-bit ALU [L2_ALU_4BIT].",
+                metadata={"benchmark_task_id": "L2_ALU_4BIT", "top_module": "alu_4bit"},
+                steps=[
+                    TrajectoryStep(
+                        step_index=0,
+                        state_summary="rtl generation",
+                        action="GENERATE_RTL",
+                        action_params={"code": "module alu_4bit; endmodule"},
+                        reward=0.8,
+                    )
+                ],
+                final_reward=0.8,
+                episode_return=0.8,
+                success=True,
+            ),
+        ]
+
+        grpo_prompts = builder.build_grpo_prompt_dataset(episodes)
+        assert len(grpo_prompts) == 2
+        assert "prompt" in grpo_prompts[0]
+        assert grpo_prompts[0]["benchmark_task_id"] == "L1_NOT_GATE"
+        assert grpo_prompts[0]["top_module"] == "not_gate"
+        assert grpo_prompts[1]["benchmark_task_id"] == "L2_ALU_4BIT"
+
+        saved_path = builder.save_grpo_prompts(grpo_prompts, name="test_grpo_prompts")
+        assert saved_path.endswith(".jsonl")

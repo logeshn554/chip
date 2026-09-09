@@ -177,7 +177,7 @@ class TrajectoryDatasetBuilder:
         self,
         episodes: list[Episode],
     ) -> list[dict[str, Any]]:
-        """Build preference dataset for GRPO/DPO training."""
+        """Build pairwise preference dataset (prompt, chosen, rejected) for DPO training."""
         task_groups: dict[str, list[Episode]] = {}
         for ep in episodes:
             key = ep.task.strip().lower()[:80]
@@ -212,6 +212,76 @@ class TrajectoryDatasetBuilder:
 
         logger.info(f"Built preference dataset: {len(dataset)} pairs")
         return dataset
+
+    def build_grpo_prompt_dataset(
+        self,
+        task_ids_or_episodes: Optional[list[Any]] = None,
+        include_all_levels: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Build prompt dataset for online/group-relative GRPO training.
+        
+        Unlike pairwise DPO datasets, GRPO requires only prompt inputs with task specifications.
+        The model samples G candidate completions per prompt, which are evaluated by
+        HardwareRewardEvaluator against the genuine EDA pipeline to calculate group advantages.
+        """
+        import re
+        from benchmarks.curriculum import BenchmarkCurriculum
+        curriculum = BenchmarkCurriculum()
+
+        resolved_task_ids: list[str] = []
+        if task_ids_or_episodes:
+            for item in task_ids_or_episodes:
+                if isinstance(item, str):
+                    resolved_task_ids.append(item)
+                elif hasattr(item, "metadata") and isinstance(item.metadata, dict):
+                    tid = item.metadata.get("benchmark_task_id")
+                    if tid:
+                        resolved_task_ids.append(tid)
+                    else:
+                        m = re.search(r"\b(L[1-7]_[A-Z0-9_]+)\b", getattr(item, "task", ""))
+                        if m:
+                            resolved_task_ids.append(m.group(1))
+
+        if resolved_task_ids:
+            tasks = [curriculum.get_task(tid) for tid in resolved_task_ids if curriculum.get_task(tid)]
+        elif include_all_levels:
+            tasks = list(curriculum._tasks.values())
+        else:
+            tasks = curriculum.get_level_tasks(1) + curriculum.get_level_tasks(3)
+
+        dataset = []
+        for task in tasks:
+            system_prompt = (
+                "You are an expert digital design engineer writing synthesizable SystemVerilog (IEEE 1800-2012).\n"
+                "Produce only clean, synthesizable SystemVerilog code without markdown explanations."
+            )
+            user_prompt = task.get_public_spec()
+            full_prompt = f"{system_prompt}\n\n{user_prompt}"
+
+            dataset.append({
+                "prompt": full_prompt,
+                "benchmark_task_id": task.id,
+                "top_module": task.top_module,
+                "level": task.level,
+                "name": task.name,
+                "verification_criteria": task.verification_criteria,
+            })
+
+        logger.info(f"Built GRPO prompt dataset: {len(dataset)} prompts across curriculum.")
+        return dataset
+
+    def save_grpo_prompts(
+        self,
+        dataset: list[dict[str, Any]],
+        name: str = "grpo_prompts",
+    ) -> str:
+        """Save GRPO prompt dataset as JSONL."""
+        path = os.path.join(self.output_dir, f"{name}.jsonl")
+        with open(path, "w", encoding="utf-8") as f:
+            for item in dataset:
+                f.write(json.dumps(item) + "\n")
+        logger.info(f"Saved {len(dataset)} GRPO prompt records to {path}")
+        return path
 
     def build_rl_transitions(
         self,

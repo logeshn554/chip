@@ -70,8 +70,8 @@ class HardwareRewardEvaluator:
 
     def __init__(
         self,
-        top_module: str = "mac",
-        test_file: str = "tests/mac/test_mac.py",
+        top_module: Optional[str] = None,
+        test_file: Optional[str] = None,
         work_dir: str = "./sim_build/grpo_eval",
         target_cells: float = 500.0,
         target_timing_ns: float = 5.0,
@@ -79,26 +79,18 @@ class HardwareRewardEvaluator:
         enable_formal: bool = True,
         formal_properties: Optional[str] = None,
         benchmark_task_id: Optional[str] = None,
+        max_concurrency: int = 4,
     ):
-        self.top_module = top_module
-        self.test_file = test_file
+        self.default_top_module = top_module or "mac"
+        self.default_test_file = test_file or "tests/mac/test_mac.py"
         self.work_dir = work_dir
         self.target_cells = target_cells
         self.target_timing_ns = target_timing_ns
         self.enable_synthesis = enable_synthesis
         self.enable_formal = enable_formal
-        self.formal_properties = formal_properties
-
-        if benchmark_task_id:
-            try:
-                from benchmarks.curriculum import BenchmarkCurriculum
-                task_obj = BenchmarkCurriculum().get_task(benchmark_task_id)
-                if task_obj:
-                    self.top_module = task_obj.top_module
-                    if task_obj.formal_properties and not self.formal_properties:
-                        self.formal_properties = task_obj.formal_properties
-            except Exception as e:
-                logger.debug(f"Could not load benchmark task {benchmark_task_id}: {e}")
+        self.default_formal_properties = formal_properties
+        self.default_benchmark_task_id = benchmark_task_id
+        self.max_concurrency = max_concurrency
 
         os.makedirs(work_dir, exist_ok=True)
 
@@ -107,6 +99,70 @@ class HardwareRewardEvaluator:
         self.yosys = YosysTool(work_dir=os.path.join(work_dir, "synth"))
         self.formal = FormalVerificationTool(work_dir=os.path.join(work_dir, "formal"))
         self.reward_engine = RewardEngine()
+
+    def resolve_benchmark_task(
+        self,
+        task_id: Optional[str] = None,
+        prompt: Optional[str] = None,
+        code: Optional[str] = None,
+        completion: Optional[str] = None,
+    ) -> Optional[Any]:
+        """Dynamically resolve the benchmark task configuration from task_id, prompt, or RTL code."""
+        try:
+            from benchmarks.curriculum import BenchmarkCurriculum
+            curriculum = BenchmarkCurriculum()
+        except Exception:
+            return None
+
+        code_text = code or completion
+
+        # 1. Direct task ID match
+        if task_id:
+            t = curriculum.get_task(task_id)
+            if t:
+                return t
+
+        # 2. Extract benchmark ID from prompt (e.g. "[L1_NOT_GATE", "L3_MAC_8BIT_SIGNED", "L2_ALU_4BIT")
+        if prompt:
+            id_match = re.search(r"\b(L[1-7]_[A-Z0-9_]+)\b", prompt)
+            if id_match:
+                t = curriculum.get_task(id_match.group(1))
+                if t:
+                    return t
+
+            # Match by module name in prompt
+            mod_match = re.search(r"Module Name:\s*([a-zA-Z0-9_]+)", prompt)
+            if mod_match:
+                target_m = mod_match.group(1).lower()
+                for task in curriculum._tasks.values():
+                    if task.top_module.lower() == target_m:
+                        return task
+
+            # Match any task by ID or top module keyword in prompt
+            for task in curriculum._tasks.values():
+                if task.id in prompt or task.top_module.lower() in prompt.lower():
+                    return task
+
+        # 3. Extract module name from candidate RTL code
+        if code_text:
+            code_mod = re.search(r"\bmodule\s+([a-zA-Z0-9_]+)", code_text)
+            if code_mod:
+                target_m = code_mod.group(1).lower()
+                target_norm = target_m.replace("_", "")
+                for task in curriculum._tasks.values():
+                    task_norm = task.top_module.lower().replace("_", "")
+                    if (
+                        task.top_module.lower() == target_m
+                        or task_norm == target_norm
+                        or target_norm in task.id.lower().replace("_", "")
+                    ):
+                        return task
+
+        # 4. Fall back to default benchmark if set
+        if self.default_benchmark_task_id:
+            return curriculum.get_task(self.default_benchmark_task_id)
+
+        return None
 
     def extract_rtl(self, text: str) -> str:
         """Extract SystemVerilog code from model completion output."""
@@ -132,8 +188,14 @@ class HardwareRewardEvaluator:
 
         return ""
 
-    async def evaluate_completion_async(self, completion: str, task_name: Optional[str] = None) -> dict[str, Any]:
-        """Evaluate a single completion asynchronously using EDA tools."""
+    async def evaluate_completion_async(
+        self,
+        completion: str,
+        benchmark_task_id: Optional[str] = None,
+        prompt: Optional[str] = None,
+        sub_work_dir: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Evaluate a single completion asynchronously using EDA tools for the resolved task."""
         code = self.extract_rtl(completion)
         if not code:
             return {
@@ -143,16 +205,24 @@ class HardwareRewardEvaluator:
                 "error": "No synthesizable SystemVerilog module found in completion.",
             }
 
-        cand_hash = hashlib.md5(completion.encode("utf-8")).hexdigest()[:8]
-        cand_dir = os.path.join(self.work_dir, f"cand_{cand_hash}")
+        # Resolve benchmark task dynamically (mixed curriculum support)
+        task_obj = self.resolve_benchmark_task(task_id=benchmark_task_id, prompt=prompt, code=code)
+
+        top_module = getattr(task_obj, "top_module", self.default_top_module)
+        formal_properties = getattr(task_obj, "formal_properties", self.default_formal_properties)
+        test_file = self.default_test_file
+
+        cand_hash = hashlib.md5((completion + (task_obj.id if task_obj else "")).encode("utf-8")).hexdigest()[:8]
+        dir_name = sub_work_dir or f"cand_{cand_hash}"
+        cand_dir = os.path.join(self.work_dir, dir_name)
         os.makedirs(cand_dir, exist_ok=True)
-        rtl_path = os.path.join(cand_dir, f"{self.top_module}.sv")
+        rtl_path = os.path.join(cand_dir, f"{top_module}.sv")
 
         with open(rtl_path, "w", encoding="utf-8") as f:
             f.write(code)
 
         # Stage 1: Verilator Lint & Syntax Compile Check (Hard Gate)
-        compile_res = await self.verilator.lint_and_compile(rtl_path, top_module=self.top_module)
+        compile_res = await self.verilator.lint_and_compile(rtl_path, top_module=top_module)
         compile_pass = compile_res.get("status") == "passed"
         if not compile_pass:
             return {
@@ -160,11 +230,16 @@ class HardwareRewardEvaluator:
                 "compile_pass": False,
                 "functional_pass": False,
                 "error": compile_res.get("error", "Compilation failed"),
+                "task_id": getattr(task_obj, "id", None),
+                "top_module": top_module,
             }
 
-        # Stage 2: Cocotb / pytest functional verification
-        test_file = self.test_file if os.path.exists(self.test_file) else None
-        func_res = await self.cocotb.run_tests(rtl_path, test_file or "tests/mac/test_mac.py")
+        # Stage 2: Cocotb / testbench functional verification with benchmark task vectors
+        func_res = await self.cocotb.run_tests(
+            rtl_path,
+            testbench_path=test_file if (os.path.exists(test_file) and top_module == "mac") else None,
+            benchmark_task=task_obj,
+        )
         total_tests = func_res.get("tests_total", 0)
         passed_tests = func_res.get("tests_passed", 0)
         pass_rate = (passed_tests / total_tests) if total_tests > 0 else (1.0 if func_res.get("status") == "passed" else 0.0)
@@ -172,17 +247,17 @@ class HardwareRewardEvaluator:
         # Stage 3: Logic Synthesis (Yosys)
         area: Optional[float] = None
         if self.enable_synthesis:
-            synth_res = await self.yosys.synthesize(rtl_path, top_module=self.top_module)
+            synth_res = await self.yosys.synthesize(rtl_path, top_module=top_module)
             if synth_res.get("status") == "passed":
                 area = float(synth_res.get("cells", 0) or synth_res.get("estimated_area", 0) or 0)
 
-        # Stage 4: Formal Verification (SymbiYosys) using external benchmark properties
+        # Stage 4: Formal Verification (SymbiYosys) using task's external benchmark properties
         formal_status = "SKIPPED"
         if self.enable_formal:
             formal_res = await self.formal.verify(
                 rtl_path,
-                top_module=self.top_module,
-                external_properties=self.formal_properties,
+                top_module=top_module,
+                external_properties=formal_properties,
             )
             formal_status = formal_res.get("status", "SKIPPED")
 
@@ -203,27 +278,68 @@ class HardwareRewardEvaluator:
             "formal_status": formal_status,
             "area": area,
             "breakdown": reward_result.breakdown,
+            "task_id": getattr(task_obj, "id", None),
+            "top_module": top_module,
         }
 
-    def evaluate_completion(self, completion: str) -> float:
+    def evaluate_completion(self, completion: str, benchmark_task_id: Optional[str] = None, prompt: Optional[str] = None) -> float:
         """Synchronous wrapper returning normalized reward in [0.0, 1.0]."""
-        res = asyncio.run(self.evaluate_completion_async(completion))
+        res = asyncio.run(self.evaluate_completion_async(completion, benchmark_task_id=benchmark_task_id, prompt=prompt))
         return float(res["reward"])
 
-    def evaluate_batch(self, completions: list[str], **kwargs) -> list[float]:
-        """Compute grounded hardware rewards for a batch/group of candidate completions."""
-        rewards = []
-        for c in completions:
-            r = self.evaluate_completion(c)
-            rewards.append(r)
-        return rewards
+    async def evaluate_batch_async(
+        self,
+        completions: list[str],
+        prompts: Optional[list[str]] = None,
+        task_ids: Optional[list[str]] = None,
+        **kwargs: Any,
+    ) -> list[float]:
+        """Concurrently evaluate candidate completions in isolated sub-workspaces with bounded parallelism."""
+        if not completions:
+            return []
+
+        concurrency = kwargs.get("max_concurrency") or self.max_concurrency
+        sem = asyncio.Semaphore(concurrency)
+
+        async def _eval_one(completion: str, idx: int) -> float:
+            async with sem:
+                pr = prompts[idx] if (prompts and idx < len(prompts)) else None
+                tid = task_ids[idx] if (task_ids and idx < len(task_ids)) else kwargs.get("benchmark_task_id")
+                sub_dir = f"worker_{idx}_{hashlib.md5(completion.encode('utf-8')).hexdigest()[:6]}"
+                res = await self.evaluate_completion_async(
+                    completion,
+                    benchmark_task_id=tid,
+                    prompt=pr,
+                    sub_work_dir=sub_dir,
+                )
+                return float(res.get("reward", 0.0))
+
+        tasks = [_eval_one(c, i) for i, c in enumerate(completions)]
+        return await asyncio.gather(*tasks)
+
+    def evaluate_batch(
+        self,
+        completions: list[str],
+        prompts: Optional[list[str]] = None,
+        task_ids: Optional[list[str]] = None,
+        **kwargs: Any,
+    ) -> list[float]:
+        """Synchronous wrapper for concurrent batch evaluation."""
+        return asyncio.run(
+            self.evaluate_batch_async(
+                completions,
+                prompts=prompts,
+                task_ids=task_ids,
+                **kwargs,
+            )
+        )
 
 
 class GRPOTrainer:
     """Group Relative Policy Optimization for Qwen3-4B with Hardware Evaluator.
 
     GRPO evaluates groups of G candidate responses per prompt against the real EDA
-    environment, computes group-relative advantages, and updates policy weights.
+    environment concurrently, computes group-relative advantages, and updates policy weights.
     """
 
     def __init__(self, config: dict[str, Any] | None = None):
@@ -236,18 +352,24 @@ class GRPOTrainer:
 
         # Hardware evaluator
         self.evaluator = HardwareRewardEvaluator(
-            top_module=config.get("top_module", "mac"),
-            test_file=config.get("test_file", "tests/mac/test_mac.py"),
+            top_module=config.get("top_module"),
+            test_file=config.get("test_file"),
             target_cells=config.get("target_cells", 500.0),
+            max_concurrency=config.get("max_concurrency", 4),
         )
 
-    def compute_step_advantages(self, completions: list[str]) -> tuple[list[float], list[float]]:
-        """Evaluate a group of candidate completions and compute their relative advantages.
+    def compute_step_advantages(
+        self,
+        completions: list[str],
+        prompts: Optional[list[str]] = None,
+        task_id: Optional[str] = None,
+    ) -> tuple[list[float], list[float]]:
+        """Evaluate a group of candidate completions concurrently and compute their relative advantages.
         
         Returns:
             (rewards, advantages): tuple of grounded EDA rewards in [0, 1] and normalized advantages.
         """
-        rewards = self.evaluator.evaluate_batch(completions)
+        rewards = self.evaluator.evaluate_batch(completions, prompts=prompts, benchmark_task_id=task_id)
         advantages = compute_group_advantages(rewards)
         return rewards, advantages
 
@@ -314,10 +436,10 @@ class GRPOTrainer:
             num_generations=self.group_size,
         )
 
-        # Genuine hardware evaluation reward function
-        def hardware_reward_fn(completions: list[str], **kwargs) -> list[float]:
-            """Evaluate completions with real Verilator/Cocotb/Yosys EDA pipeline."""
-            return self.evaluator.evaluate_batch(completions, **kwargs)
+        # Genuine hardware evaluation reward function with task-aware routing
+        def hardware_reward_fn(completions: list[str], prompts: list[str] | None = None, **kwargs: Any) -> list[float]:
+            """Evaluate completions with real Verilator/Cocotb/Yosys EDA pipeline concurrently across curriculum tasks."""
+            return self.evaluator.evaluate_batch(completions, prompts=prompts, **kwargs)
 
         trainer = TRLGRPOTrainer(
             model=model,

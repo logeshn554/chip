@@ -37,6 +37,16 @@ class BenchmarkTask:
     held_out_tests: list[dict[str, Any]] = field(default_factory=list)
     formal_properties: str = ""  # Separate SystemVerilog formal property specification
 
+    @property
+    def task_id(self) -> str:
+        """Compatibility property for task id."""
+        return self.id
+
+    @property
+    def public_test_cases(self) -> list[dict[str, Any]]:
+        """Compatibility property for public test cases."""
+        return self.public_tests
+
     def get_public_spec(self) -> str:
         """Text presented to the agent without exposing held-out test vectors."""
         criteria_list = "\n".join(f"- {c}" for c in self.verification_criteria)
@@ -130,6 +140,7 @@ endmodule
 """,
             public_tests=[{"sel": 0, "d0": 42, "d1": 99, "expected": 42}],
             held_out_tests=[{"sel": 1, "d0": 42, "d1": 99, "expected": 99}],
+            formal_properties="always_comb begin assert property (sel ? (y == d1) : (y == d0)); end",
         ))
 
         self._register(BenchmarkTask(
@@ -152,6 +163,7 @@ endmodule
 """,
             public_tests=[{"en": 1, "in": 0, "expected": 1}, {"en": 0, "in": 3, "expected": 0}],
             held_out_tests=[{"en": 1, "in": 2, "expected": 4}, {"en": 1, "in": 3, "expected": 8}],
+            formal_properties="always_comb begin if (!en) assert property (out == 4'b0000); else assert property (out == (4'b0001 << in)); end",
         ))
 
         self._register(BenchmarkTask(
@@ -175,6 +187,7 @@ endmodule
 """,
             public_tests=[{"cycles": 5, "en": 1, "expected": 5}],
             held_out_tests=[{"cycles": 16, "en": 1, "expected": 0}],
+            formal_properties="always @(posedge clk) if (!rst_n) assert property (count == 4'd0); else if (en && $past(rst_n)) assert property (count == ($past(count) + 4'd1));",
         ))
 
         # ─────────────────────────────────────────────────────────────
@@ -213,6 +226,7 @@ endmodule
 """,
             public_tests=[{"op": 0, "a": 3, "b": 4, "expected_result": 7}],
             held_out_tests=[{"op": 1, "a": 5, "b": 5, "expected_zero": 1}],
+            formal_properties="always_comb begin if (op == 3'b000) assert property (result == a + b); if (op == 3'b010) assert property (result == (a & b)); if (result == 4'b0000) assert property (zero == 1'b1); end",
         ))
 
         self._register(BenchmarkTask(
@@ -265,6 +279,7 @@ endmodule
 """,
             public_tests=[{"writes": [10, 20], "reads": 1, "expected_first": 10}],
             held_out_tests=[{"fill": 8, "expected_full": 1}],
+            formal_properties="always_comb begin if (count == DEPTH) assert property (full == 1'b1); if (count == 0) assert property (empty == 1'b1); end",
         ))
 
         # ─────────────────────────────────────────────────────────────
@@ -349,6 +364,7 @@ endmodule
 """,
             public_tests=[{"op": 0, "a": [1, 2, 3, 4], "b": [10, 20, 30, 40], "expected": [11, 22, 33, 44]}],
             held_out_tests=[{"op": 3, "a": [5, -2, 10, 0], "b": [3, 4, 9, -1], "expected": [5, 4, 10, 0]}],
+            formal_properties="always_comb begin if (op == 2'b00) assert property (y[0] == a[0] + b[0]); if (op == 2'b01) assert property (y[0] == a[0] - b[0]); end",
         ))
 
         # ─────────────────────────────────────────────────────────────
@@ -391,6 +407,7 @@ endmodule
 """,
             public_tests=[{"write_addr": 4, "data": 305419896, "be": 15}],
             held_out_tests=[{"byte_mask": 1, "expected_modified_only": 1}],
+            formal_properties="always @(posedge clk) if (ce && we && be == 4'b1111) assert property (dout == din);",
         ))
 
         # ─────────────────────────────────────────────────────────────
@@ -430,6 +447,7 @@ endmodule
 """,
             public_tests=[{"ctrl": 0, "a": 100, "b": 200, "expected": 300}],
             held_out_tests=[{"ctrl": 13, "a": 4294967264, "b": 2, "expected_sra": 4294967288}],
+            formal_properties="always_comb begin if (alu_ctrl == 4'b0000) assert property (result == a + b); if (alu_ctrl == 4'b1000) assert property (result == a - b); end",
         ))
 
         # ─────────────────────────────────────────────────────────────
@@ -480,6 +498,7 @@ endmodule
 """,
             public_tests=[{"weight": 2, "act": 3, "psum_in": 10, "expected_psum": 16}],
             held_out_tests=[{"load": 1, "weight": -4, "act": 5, "psum_in": 50, "expected_psum": 30}],
+            formal_properties="always @(posedge clk) if (!rst_n) assert property (act_out == '0 && psum_out == '0); else if (load_weight) assert property (weight_reg == weight_in);",
         ))
 
     def _register(self, task: BenchmarkTask):
@@ -487,6 +506,7 @@ endmodule
 
 
 _CURRICULUM_INSTANCE = BenchmarkCurriculum()
+CURRICULUM_BENCHMARKS = _CURRICULUM_INSTANCE._tasks
 
 
 def get_benchmark(task_id: str) -> Optional[BenchmarkTask]:
@@ -497,3 +517,8 @@ def get_benchmark(task_id: str) -> Optional[BenchmarkTask]:
 def get_curriculum_level(level: int) -> list[BenchmarkTask]:
     """Get all benchmark tasks for a given level."""
     return _CURRICULUM_INSTANCE.get_level_tasks(level)
+
+
+def get_all_benchmarks() -> dict[str, BenchmarkTask]:
+    """Get all curriculum benchmark tasks as a mapping."""
+    return dict(_CURRICULUM_INSTANCE._tasks)

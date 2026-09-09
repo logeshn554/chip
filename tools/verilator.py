@@ -45,9 +45,10 @@ class VerilatorTool:
         """Built-in SystemVerilog syntax and lint validator."""
         lines = code.splitlines()
 
-        # 1. Check module / endmodule balance
-        has_module = any(re.match(r"^\s*module\s+\w+", line) for line in lines)
-        has_endmodule = any(re.match(r"^\s*endmodule\b", line) for line in lines)
+        # 1. Check module / endmodule balance (ignoring comments)
+        cleaned_lines = [re.sub(r"//.*", "", line) for line in lines]
+        has_module = any(re.search(r"\bmodule\s+\w+", l) for l in cleaned_lines)
+        has_endmodule = any(re.search(r"\bendmodule\b", l) for l in cleaned_lines)
 
         if not has_module:
             return {

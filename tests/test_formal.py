@@ -79,3 +79,38 @@ class TestFormalVerificationTool:
         content = instrumented_file.read_text()
         assert "accum == '0" in content
         assert "`ifdef FORMAL" in content
+
+    @pytest.mark.asyncio
+    async def test_curriculum_benchmark_formal_properties(self, tmp_path):
+        from benchmarks.curriculum import CURRICULUM_BENCHMARKS
+        tool = FormalVerificationTool(sby_binary="non_existent_sby_binary_12345", work_dir=str(tmp_path))
+        
+        # Test combinational benchmark (L1_MUX2TO1) and sequential benchmark (L1_COUNTER)
+        test_tasks = ["L1_MUX2TO1", "L1_COUNTER", "L2_ALU_4BIT"]
+        for task_id in test_tasks:
+            task = CURRICULUM_BENCHMARKS[task_id]
+            assert task.formal_properties is not None
+            assert len(task.formal_properties.strip()) > 0
+
+            # Write reference or mock RTL
+            task_dir = tmp_path / task_id
+            task_dir.mkdir(parents=True, exist_ok=True)
+            rtl_file = task_dir / f"{task.top_module}.sv"
+            rtl_file.write_text(f"module {task.top_module};\nendmodule\n")
+
+            res = await tool.verify(
+                str(rtl_file),
+                top_module=task.top_module,
+                external_properties=task.formal_properties,
+            )
+            assert res["status"] == "SKIPPED"
+            assert res["properties_checked"] >= 1
+
+            # Validate generated .sby configuration
+            cfg = tool.generate_sby_config(
+                top_module=task.top_module,
+                rtl_file=str(rtl_file),
+                properties_file=f"{task.top_module}_spec.sv",
+            )
+            assert f"prep -top {task.top_module}" in cfg
+            assert "mode bmc" in cfg

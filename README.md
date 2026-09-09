@@ -120,29 +120,30 @@ A standardized progressive hardware curriculum with held-out test suites, extern
 
 ---
 
-## 7. Learning Foundations: SFT, Hardware-in-the-Loop GRPO, and Gymnasium RL Environment
+## 7. Learning Foundations: SFT, Curriculum-Aware GRPO, and Active Gymnasium RL Environment
 
 The repository provides concrete, reproducible learning infrastructure:
 
 - **Official Gymnasium RL Environment** (`learning/environment.py`):
   - Inherits `gymnasium.Env` and strictly enforces identical schema contracts across `observation_space`, `reset()`, and `step()`.
-  - **Base Dictionary Space**: Structured text and numeric dict (`task`, `step`, `current_rtl`, `last_error`, `best_reward`, `current_reward`, `status`) matching `spaces.Dict` with printable character sets.
-  - **Vector Wrapper (`HardwareVectorObservationWrapper`)**: Projects observations into a 1D `spaces.Box(shape=(10,), dtype=np.float32)` vector for classical RL algorithms (e.g. Stable-Baselines3 PPO/DQN).
+  - **Base Dictionary Space**: Structured text and numeric dict (`task`, `step`, `current_rtl`, `last_error`, `best_reward`, `current_reward`, `status`, `retrieved_context`) matching `spaces.Dict` with printable character sets.
+  - **Active Research Integration**: `RETRIEVE_MEMORY` directly queries the 4-tier ChromaDB knowledge base, and `SEARCH_WEB` invokes `ScrapeGraphAdapter.extract_compact_context()` to actively populate `retrieved_context` in observations with exploration rewards conditioned on finding technical documentation.
+  - **Vector Wrapper (`HardwareVectorObservationWrapper`)**: Projects observations into a 1D `spaces.Box(shape=(11,), dtype=np.float32)` vector (including retrieved context presence) for classical RL algorithms (e.g. Stable-Baselines3 PPO/DQN).
   - **Policy Wrapper (`QwenHardwareDesignPolicy`)**: Demonstrates how external LLM policies (Qwen3-4B) interact with `HardwareDesignEnv`.
-- **Genuine Hardware-Reward GRPO** (`learning/grpo.py`):
-  - `HardwareRewardEvaluator`: Evaluates candidate completions directly with Verilator lint/compile, Cocotb functional simulation, Yosys synthesis, and SymbiYosys formal verification.
-  - Eliminates heuristic completion length proxies in favor of grounded hardware rewards in $[0.0, 1.0]$.
+- **Curriculum-Aware Hardware-Reward GRPO** (`learning/grpo.py`):
+  - `HardwareRewardEvaluator`: Generalizes beyond a single module to evaluate candidate completions across any benchmark level (`L1_NOT_GATE`, `L1_MUX2TO1`, `L2_ALU_4BIT`, `L3_MAC_8BIT_SIGNED`, `L7_NPU_PE`, etc.) via `resolve_benchmark_task()`.
+  - Eliminates heuristic completion length proxies in favor of grounded hardware rewards in $[0.0, 1.0]$ derived from Verilator syntax/lint checks, Cocotb functional vectors, Yosys logic synthesis, and SymbiYosys formal verification.
+  - **Bounded Parallelism & Workspace Isolation**: `evaluate_batch_async` evaluates candidate completion groups concurrently with `asyncio.Semaphore(max_concurrency)` in isolated subdirectories (`worker_{idx}_{hash}`), preventing file collisions and speeding up hardware-in-the-loop GRPO training.
   - `compute_group_advantages`: Implements standalone group-relative advantage normalization: $A_i = (R_i - \mu)/\sigma$.
-  - `GRPOTrainer.compute_step_advantages`: Evaluates completion groups and calculates relative advantages directly.
-  - TRL Integration: Fully compatible with Hugging Face TRL `GRPOTrainer` using `HardwareRewardEvaluator` as its reward callback.
-- **RL Transition Dataset Builder** (`learning/dataset.py`):
-  - Converts raw trajectory logs into standardized $(s_t, a_t, r_t, s_{t+1}, done)$ MDP transitions (`RLTransition`).
-  - Prepares failure/fix pairs for error-recovery SFT.
-  - Generates preference pairs (`prompt`, `chosen`, `rejected`) for DPO/GRPO.
+  - TRL Integration: Fully compatible with Hugging Face TRL `GRPOTrainer` using `HardwareRewardEvaluator.evaluate_batch` with per-prompt task resolution as its reward callback.
+- **Prompt & RL Dataset Builders** (`learning/dataset.py`):
+  - **Online GRPO Prompt Dataset**: `build_grpo_prompt_dataset()` generates prompt-only datasets across curriculum tasks for sampling $G$ completions per prompt during online GRPO.
+  - **Pairwise DPO Dataset**: `build_preference_dataset()` generates `(prompt, chosen, rejected)` triplets from trajectory archives for offline preference optimization.
+  - **RL Transition Dataset**: Converts raw trajectory logs into standardized $(s_t, a_t, r_t, s_{t+1}, done)$ MDP transitions (`RLTransition`) for offline RL and Q/value learning.
 - **Honest Status on Self-Evolution**:
   - **In-Episode Adaptation (Phase A)**: Implemented & verified (agent diagnoses compiler/simulation errors and repairs RTL).
   - **Memory-Based Improvement (Phase B)**: Implemented & verified (retrieves past fixes from ChromaDB).
-  - **Model Weight Evolution (Phase C/D)**: Foundation, Gymnasium environment, Hardware-Reward GRPO evaluator, advantage computation, and transition datasets are fully implemented and verified. Actual model weight updating requires running offline SFT/GRPO on collected trajectories with GPU compute.
+  - **Model Weight Evolution (Phase C/D)**: Foundation, Gymnasium environment with active research actions, curriculum-aware Hardware-Reward GRPO evaluator with bounded parallelism, prompt dataset builders, advantage computation, and transition datasets are fully implemented and verified. Actual model weight updating requires running offline SFT/GRPO on collected trajectories with GPU compute.
 
 ---
 
@@ -167,7 +168,7 @@ python main.py status
 ```bash
 python -m pytest tests/ -v
 ```
-*(Runs 104 test cases covering JSON parsing, error recovery, security path restriction, formal verification, Scraping filters, reward math, vector wrappers, and the RL environment).*
+*(Runs 110 test cases covering JSON parsing, error recovery, security path restriction, formal verification, Scraping filters, reward math, vector wrappers, active Gymnasium environment, curriculum benchmark resolution, and concurrent GRPO batching).*
 
 ### Step 4: Run End-to-End Milestone (8-Bit Signed MAC)
 ```bash

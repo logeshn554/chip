@@ -122,8 +122,36 @@ class TestHardwareDesignEnv:
         env = HardwareVectorObservationWrapper(raw_env)
         obs, info = env.reset()
         assert isinstance(obs, np.ndarray)
-        assert obs.shape == (10,)
+        assert obs.shape == (11,)
         assert obs.dtype == np.float32
+        assert env.observation_space.contains(obs)
+
+    def test_active_memory_and_web_research(self, tmp_path):
+        env = HardwareDesignEnv(work_dir=str(tmp_path / "rl_active_research"))
+        obs, info = env.reset()
+        assert obs["retrieved_context"] == ""
+
+        # Test active RETRIEVE_MEMORY
+        obs, reward, terminated, truncated, info = env.step({
+            "action": "RETRIEVE_MEMORY",
+            "params": {"query": "MAC multiply accumulate pipeline"},
+        })
+        assert not terminated
+        assert reward > 0.0
+        assert info["action_executed"] == "RETRIEVE_MEMORY"
+        # Check that retrieved_context field is present and valid string
+        assert isinstance(obs["retrieved_context"], str)
+        assert env.observation_space.contains(obs)
+
+        # Test active SEARCH_WEB
+        obs, reward, terminated, truncated, info = env.step({
+            "action": "SEARCH_WEB",
+            "params": {"query": "SystemVerilog IEEE 1800 formal property guidelines"},
+        })
+        assert not terminated
+        assert reward > 0.0
+        assert info["action_executed"] == "SEARCH_WEB"
+        assert isinstance(obs["retrieved_context"], str)
         assert env.observation_space.contains(obs)
 
     def test_qwen_hardware_design_policy(self):
