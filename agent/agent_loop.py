@@ -139,11 +139,25 @@ class AgentLoop:
                 console.print(f"  [yellow]⚠ {result.status.value}: {result.output[:200]}[/]")
                 retries += 1
 
-            # 3e. Evaluate if we have artifacts to evaluate
-            if result.artifacts and self.evaluator:
+            # 3e. Stage-driven Evaluation: evaluate upon design generation, simulation, synthesis, or optimization
+            should_evaluate = bool(
+                result.artifacts
+                or action.action_type in (ActionType.SIMULATE, ActionType.SYNTHESIZE, ActionType.GENERATE_RTL, ActionType.OPTIMIZE)
+            )
+            if should_evaluate and self.evaluator:
                 eval_result = await self._evaluate(state)
                 step_reward = eval_result.reward
-                state.cumulative_reward = eval_result.reward
+                state.current_design_reward = eval_result.reward
+                state.cumulative_reward += step_reward
+                state.episode_return += step_reward
+                state.best_reward = max(state.best_reward, eval_result.reward)
+
+                # Record stage-specific score
+                if action.action_type == ActionType.SIMULATE:
+                    state.verification_stages["functional"] = eval_result.breakdown
+                elif action.action_type == ActionType.SYNTHESIZE:
+                    state.verification_stages["synthesis"] = eval_result.breakdown
+
                 self._display_evaluation(eval_result)
 
             # 3f. Record trajectory step
@@ -170,10 +184,10 @@ class AgentLoop:
                 step.status = "completed" if result.status == ActionStatus.SUCCESS else "failed"
                 step.result = result
 
-            # 3j. Check early stopping
-            if state.cumulative_reward >= self.early_stop_reward:
+            # 3j. Check early stopping based on best design quality achieved
+            if state.best_reward >= self.early_stop_reward:
                 console.print(
-                    f"[bold green]🎯 Early stop — reward {state.cumulative_reward:.3f} "
+                    f"[bold green]🎯 Early stop — best reward {state.best_reward:.3f} "
                     f">= {self.early_stop_reward}[/]"
                 )
                 break
@@ -190,13 +204,17 @@ class AgentLoop:
                 "iteration": state.iteration,
                 "action": action.action_type.value,
                 "status": result.status.value,
-                "reward": step_reward,
+                "step_reward": step_reward,
+                "current_design_reward": state.current_design_reward,
+                "best_reward": state.best_reward,
             })
 
         # Finalize episode
-        episode.final_reward = state.cumulative_reward
+        episode.final_reward = state.current_design_reward
+        episode.best_reward = state.best_reward
+        episode.episode_return = state.episode_return
         episode.total_iterations = state.iteration
-        episode.success = state.cumulative_reward >= self.early_stop_reward
+        episode.success = state.best_reward >= self.early_stop_reward
         episode.completed_at = time.time()
 
         # Save trajectory

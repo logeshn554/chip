@@ -1,0 +1,39 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual Environment
+venv/
+.venv/
+env/
+
+# Runtime Database & Chroma Vector Storage
+data/chroma/
+data/cache/
+data/downloads/
+
+# EDA simulation and synthesis build artifacts
+sim_build/
+sim/
+synth/
+*.vcd
+*.fst
+*.ys
+*.log
+
+# Runtime trajectories and local design repository
+trajectories/runtime/
+designs/
+

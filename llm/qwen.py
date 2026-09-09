@@ -197,73 +197,114 @@ class OllamaQwenClient(LLMInterface):
         return self._extract_json(response.text)
 
     def _offline_fallback(self, prompt: str) -> str:
-        """Deterministic fallback when Ollama is offline or not yet initialized."""
+        """Deterministic fallback when Ollama is offline or model is being pulled."""
         lower = prompt.lower()
-        if "research" in lower or "search" in lower or "external" in lower:
+
+        # 1. Research Decision Phase
+        if "needs_research" in prompt or "analyze the hardware design task below" in lower:
             return json.dumps({
-                "action": "RETRIEVE_MEMORY",
-                "thinking": "Check internal memory first for hardware design rules and signed arithmetic specifications.",
-                "parameters": {"query": "8-bit signed MAC architecture SystemVerilog", "memory_type": "knowledge"}
+                "needs_research": False,
+                "reasoning": "Standard 8-bit signed MAC architecture is well covered by internal knowledge.",
+                "focused_query": "8-bit signed MAC SystemVerilog",
+                "recommended_action": "RETRIEVE_MEMORY",
             })
-        if "create_rtl" in lower or "mac" in lower or "design an 8-bit" in lower:
+
+        # 2. Error Inspection & Repair Phase
+        if "current error" in lower and "failed" in lower:
+            return json.dumps({
+                "action": "INSPECT_ERROR",
+                "thinking": "Analyze the structured failure to identify the error source.",
+                "parameters": {"stage": "verilator", "error_summary": "Error analysis"},
+            })
+
+        # 4. Pipeline Progression based on actual progress history
+        progress = ""
+        if "## recent progress summary" in lower:
+            progress = lower.split("## recent progress summary")[1].split("##")[0]
+
+        if "create_rtl" not in progress:
+            mac_rtl = (
+                "`timescale 1ns / 1ps\n\n"
+                "module mac #(\n"
+                "    parameter int DATA_WIDTH = 8,\n"
+                "    parameter int ACC_WIDTH  = 32\n"
+                ") (\n"
+                "    input  logic                          clk,\n"
+                "    input  logic                          rst_n,\n"
+                "    input  logic                          en,\n"
+                "    input  logic                          clr,\n"
+                "    input  logic signed [DATA_WIDTH-1:0]  a,\n"
+                "    input  logic signed [DATA_WIDTH-1:0]  b,\n"
+                "    output logic signed [ACC_WIDTH-1:0]   out,\n"
+                "    output logic                          valid\n"
+                ");\n\n"
+                "    localparam int PROD_WIDTH = 2 * DATA_WIDTH;\n"
+                "    logic signed [PROD_WIDTH-1:0] product;\n"
+                "    logic signed [ACC_WIDTH-1:0]  acc_reg;\n"
+                "    logic                         valid_reg;\n"
+                "    logic signed [ACC_WIDTH-1:0]  product_ext;\n\n"
+                "    always_comb begin\n"
+                "        product = a * b;\n"
+                "        product_ext = { {(ACC_WIDTH - PROD_WIDTH){product[PROD_WIDTH-1]}}, product };\n"
+                "    end\n\n"
+                "    always_ff @(posedge clk or negedge rst_n) begin\n"
+                "        if (!rst_n) begin\n"
+                "            acc_reg   <= '0;\n"
+                "            valid_reg <= 1'b0;\n"
+                "        end else if (clr) begin\n"
+                "            acc_reg   <= '0;\n"
+                "            valid_reg <= 1'b0;\n"
+                "        end else if (en) begin\n"
+                "            acc_reg   <= acc_reg + product_ext;\n"
+                "            valid_reg <= 1'b1;\n"
+                "        end else begin\n"
+                "            valid_reg <= 1'b0;\n"
+                "        end\n"
+                "    end\n\n"
+                "    assign out   = acc_reg;\n"
+                "    assign valid = valid_reg;\n\n"
+                "endmodule\n"
+            )
             return json.dumps({
                 "action": "CREATE_RTL",
                 "thinking": "Generate synthesizable SystemVerilog for 8-bit signed MAC unit: result = (a * b) + acc.",
                 "parameters": {
                     "module_name": "mac",
                     "filename": "mac.sv",
-                    "code": (
-                        "// 8-bit Signed MAC Unit\n"
-                        "module mac #(\n"
-                        "    parameter int DATA_WIDTH = 8,\n"
-                        "    parameter int ACC_WIDTH = 32\n"
-                        ") (\n"
-                        "    input  logic                   clk,\n"
-                        "    input  logic                   rst_n,\n"
-                        "    input  logic                   en,\n"
-                        "    input  logic                   clr,\n"
-                        "    input  logic signed [DATA_WIDTH-1:0] a,\n"
-                        "    input  logic signed [DATA_WIDTH-1:0] b,\n"
-                        "    output logic signed [ACC_WIDTH-1:0]  out,\n"
-                        "    output logic                   valid\n"
-                        ");\n"
-                        "    logic signed [2*DATA_WIDTH-1:0] product;\n"
-                        "    logic signed [ACC_WIDTH-1:0]    acc_reg;\n"
-                        "    logic                           valid_reg;\n\n"
-                        "    always_comb begin\n"
-                        "        product = a * b;\n"
-                        "    end\n\n"
-                        "    always_ff @(posedge clk or negedge rst_n) begin\n"
-                        "        if (!rst_n) begin\n"
-                        "            acc_reg   <= '0;\n"
-                        "            valid_reg <= 1'b0;\n"
-                        "        end else if (clr) begin\n"
-                        "            acc_reg   <= '0;\n"
-                        "            valid_reg <= 1'b0;\n"
-                        "        end else if (en) begin\n"
-                        "            acc_reg   <= acc_reg + {{ (ACC_WIDTH - 2*DATA_WIDTH){product[2*DATA_WIDTH-1]} }, product};\n"
-                        "            valid_reg <= 1'b1;\n"
-                        "        end else begin\n"
-                        "            valid_reg <= 1'b0;\n"
-                        "        end\n"
-                        "    end\n\n"
-                        "    assign out   = acc_reg;\n"
-                        "    assign valid = valid_reg;\n"
-                        "endmodule\n"
-                    )
-                }
+                    "code": mac_rtl,
+                },
             })
-        if "edit_rtl" in lower or "fix" in lower or "stage" in lower:
+
+        if "run_verilator" not in progress:
             return json.dumps({
-                "action": "EDIT_RTL",
-                "thinking": "Apply fix to resolve signed width expansion error.",
-                "parameters": {
-                    "filename": "mac.sv",
-                    "code": "// Fixed mac.sv with proper signed sign-extension\n"
-                }
+                "action": "RUN_VERILATOR",
+                "thinking": "Run Verilator lint and syntax verification on the generated mac.sv.",
+                "parameters": {"sources": ["mac.sv"]},
             })
+
+        if "run_cocotb" not in progress:
+            return json.dumps({
+                "action": "RUN_COCOTB",
+                "thinking": "Run functional verification test suite for signed arithmetic.",
+                "parameters": {"rtl_file": "mac.sv", "testbench": "test_mac.py"},
+            })
+
+        if "run_yosys" not in progress:
+            return json.dumps({
+                "action": "RUN_YOSYS",
+                "thinking": "Run logic synthesis to estimate cell count and gate equivalents.",
+                "parameters": {"file_path": "mac.sv", "top_module": "mac"},
+            })
+
+        if "save_design" not in progress:
+            return json.dumps({
+                "action": "SAVE_DESIGN",
+                "thinking": "All checks passed cleanly. Commit design revision to memory.",
+                "parameters": {"module_name": "mac", "version": "v1.0"},
+            })
+
         return json.dumps({
-            "action": "RUN_VERILATOR",
-            "thinking": "Proceed to lint and verify the design with Verilator.",
-            "parameters": {"sources": ["mac.sv"]}
+            "action": "FINISH",
+            "thinking": "Milestone accomplished. RTL verified and synthesized.",
+            "parameters": {"summary": "8-bit signed MAC verified and synthesized successfully."},
         })

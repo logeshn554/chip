@@ -9,6 +9,5 @@ pytest>=7.0.0
 pytest-asyncio>=0.21.0
 GitPython>=3.1.0
 
-# Optional / External:
-# ollama (for Ollama Python library if preferred over direct REST API)
-# scrapegraphai (for extended web scraping graphs)
+# Targeted Web Research
+scrapegraphai>=1.8.0

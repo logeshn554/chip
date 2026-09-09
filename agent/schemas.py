@@ -117,6 +117,17 @@ class Plan:
         return done / len(self.steps)
 
 
+# ── Verification Stages ───────────────────────────────────────────────
+
+class VerificationStage(str, Enum):
+    """Explicit hardware verification and physical evaluation stages."""
+    RTL_SYNTAX_LINT = "rtl_syntax_lint"
+    FUNCTIONAL_VERIFICATION = "functional_verification"
+    FORMAL_VERIFICATION = "formal_verification"
+    LOGIC_SYNTHESIS = "logic_synthesis"
+    AREA_TIMING_POWER = "area_timing_power"
+
+
 # ── Agent State ──────────────────────────────────────────────────────
 
 @dataclass
@@ -130,7 +141,11 @@ class AgentState:
     test_files: dict[str, str] = field(default_factory=dict)
     last_action: AgentAction | None = None
     last_result: ActionResult | None = None
-    cumulative_reward: float = 0.0
+    cumulative_reward: float = 0.0      # Sum of step rewards across episode
+    best_reward: float = 0.0            # Highest single evaluation reward achieved
+    current_design_reward: float = 0.0  # Most recent design evaluation score
+    episode_return: float = 0.0         # Undiscounted cumulative return for RL
+    verification_stages: dict[str, Any] = field(default_factory=dict)  # Explicit stage-based tracking
     history: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -260,6 +275,8 @@ class Episode:
     task: str = ""
     steps: list[TrajectoryStep] = field(default_factory=list)
     final_reward: float = 0.0
+    best_reward: float = 0.0
+    episode_return: float = 0.0
     total_iterations: int = 0
     success: bool = False
     started_at: float = field(default_factory=time.time)

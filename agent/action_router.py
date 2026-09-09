@@ -210,28 +210,42 @@ def build_router(
 
         router.register(ActionType.OPTIMIZE, handle_optimize)
 
-    # ── Web Search ───────────────────────────────────────────────
-    if web_searcher is not None:
-        async def handle_search(params: dict) -> ActionResult:
-            query = params.get("query", "")
-            results = await web_searcher.search(query)
-            output = "\n\n".join(
-                f"**{r.title}**\n{r.snippet}\nURL: {r.url}" for r in results
-            )
-            return ActionResult(
-                action=ActionType.SEARCH,
-                status=ActionStatus.SUCCESS,
-                output=output,
-                metrics={"results_count": len(results)},
-            )
+    # ── Targeted Web Research (ScrapeGraphAI Pipeline) ───────────
+    async def handle_search(params: dict) -> ActionResult:
+        query = params.get("query", "")
+        url = params.get("url")
 
-        router.register(ActionType.SEARCH, handle_search)
+        from scraping.scrapegraph_adapter import ScrapeGraphAdapter
+        adapter = ScrapeGraphAdapter()
+        target_url = url or "https://en.wikipedia.org/wiki/Multiply%E2%80%93accumulate_operation"
 
-    # ── Memory Inspection ────────────────────────────────────────
+        ctx = await adapter.extract_compact_context(url=target_url, focused_query=query)
+        output = ctx.to_prompt_text()
+
+        # Ingest extracted knowledge into memory if available
+        if memory_system is not None and hasattr(memory_system, "ingest"):
+            try:
+                memory_system.ingest(
+                    ctx.extracted_summary,
+                    metadata={"source": ctx.source_url, "title": ctx.title},
+                )
+            except Exception as e:
+                logger.debug(f"Knowledge ingestion skipped: {e}")
+
+        return ActionResult(
+            action=ActionType.SEARCH,
+            status=ActionStatus.SUCCESS,
+            output=output,
+            metrics={"source_url": ctx.source_url, "token_count": ctx.token_count},
+        )
+
+    router.register(ActionType.SEARCH, handle_search)
+
+    # ── Memory Inspection (3-Tier Separation) ────────────────────
     if memory_system is not None:
         async def handle_memory(params: dict) -> ActionResult:
             query = params.get("query", "")
-            memory_type = params.get("type", "all")
+            memory_type = params.get("type", "knowledge")  # "knowledge", "experience", "design"
             docs = await memory_system.query(query, memory_type=memory_type)
             output = "\n\n---\n\n".join(
                 f"[{d.source}] (score: {d.score:.3f})\n{d.content}" for d in docs
@@ -240,16 +254,33 @@ def build_router(
                 action=ActionType.INSPECT_MEMORY,
                 status=ActionStatus.SUCCESS,
                 output=output,
-                metrics={"docs_retrieved": len(docs)},
+                metrics={"docs_retrieved": len(docs), "memory_type": memory_type},
             )
 
         router.register(ActionType.INSPECT_MEMORY, handle_memory)
 
-    # ── Simulation ───────────────────────────────────────────────
+    # ── Simulation (Strict Parameter Validation) ──────────────────
     if verilator is not None:
         async def handle_simulate(params: dict) -> ActionResult:
             sources = params.get("sources", [])
             top_module = params.get("top_module", "")
+
+            # Validate parameter types and file paths (prevent arbitrary shell or unsafe paths)
+            if not isinstance(sources, list) or not sources:
+                return ActionResult(
+                    action=ActionType.SIMULATE,
+                    status=ActionStatus.FAILURE,
+                    output="Parameter validation error: 'sources' must be a non-empty list of .sv/.v files.",
+                    errors=["Invalid parameter: sources must be non-empty list"],
+                )
+            for src in sources:
+                if not isinstance(src, str) or not src.endswith((".sv", ".v")):
+                    return ActionResult(
+                        action=ActionType.SIMULATE,
+                        status=ActionStatus.FAILURE,
+                        output=f"Security/Validation error: '{src}' is not a valid .sv or .v source file.",
+                        errors=[f"Untrusted or invalid source file: {src}"],
+                    )
 
             compile_res = await verilator.compile(sources)
             if not compile_res.success:
@@ -275,11 +306,27 @@ def build_router(
 
         router.register(ActionType.SIMULATE, handle_simulate)
 
-    # ── Synthesis ────────────────────────────────────────────────
+    # ── Synthesis (Strict Parameter Validation) ───────────────────
     if yosys is not None:
         async def handle_synthesize(params: dict) -> ActionResult:
             sources = params.get("sources", [])
             target = params.get("target", "generic")
+
+            if not isinstance(sources, list) or not sources:
+                return ActionResult(
+                    action=ActionType.SYNTHESIZE,
+                    status=ActionStatus.FAILURE,
+                    output="Parameter validation error: 'sources' must be a non-empty list of .sv/.v files.",
+                    errors=["Invalid parameter: sources must be non-empty list"],
+                )
+            for src in sources:
+                if not isinstance(src, str) or not src.endswith((".sv", ".v")):
+                    return ActionResult(
+                        action=ActionType.SYNTHESIZE,
+                        status=ActionStatus.FAILURE,
+                        output=f"Security/Validation error: '{src}' is not a valid .sv or .v source file.",
+                        errors=[f"Untrusted or invalid source file: {src}"],
+                    )
 
             synth_res = await yosys.synthesize(sources, target)
             return ActionResult(
