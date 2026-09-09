@@ -1,0 +1,59 @@
+{# Jinja2 template: Parameterized synchronous FIFO #}
+`timescale 1ns / 1ps
+
+module {{ name | default("sync_fifo") }} #(
+    parameter DATA_WIDTH = {{ data_width | default(8) }},
+    parameter DEPTH      = {{ depth | default(16) }},
+    parameter ADDR_WIDTH = $clog2(DEPTH)
+)(
+    input  logic                    clk,
+    input  logic                    rst_n,
+
+    // Write interface
+    input  logic                    wr_en,
+    input  logic [DATA_WIDTH-1:0]   wr_data,
+
+    // Read interface
+    input  logic                    rd_en,
+    output logic [DATA_WIDTH-1:0]   rd_data,
+
+    // Status
+    output logic                    full,
+    output logic                    empty,
+    output logic [ADDR_WIDTH:0]     count
+);
+
+    // Memory
+    logic [DATA_WIDTH-1:0] mem [0:DEPTH-1];
+
+    // Pointers
+    logic [ADDR_WIDTH:0] wr_ptr;
+    logic [ADDR_WIDTH:0] rd_ptr;
+
+    // Status signals
+    assign full  = (count == DEPTH);
+    assign empty = (count == 0);
+    assign count = wr_ptr - rd_ptr;
+
+    // Write logic
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            wr_ptr <= '0;
+        end else if (wr_en && !full) begin
+            mem[wr_ptr[ADDR_WIDTH-1:0]] <= wr_data;
+            wr_ptr <= wr_ptr + 1'b1;
+        end
+    end
+
+    // Read logic
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            rd_ptr  <= '0;
+            rd_data <= '0;
+        end else if (rd_en && !empty) begin
+            rd_data <= mem[rd_ptr[ADDR_WIDTH-1:0]];
+            rd_ptr  <= rd_ptr + 1'b1;
+        end
+    end
+
+endmodule

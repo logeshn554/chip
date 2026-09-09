@@ -1,0 +1,239 @@
+# ─────────────────────────────────────────────
+# Prompt Templates for the Hardware Agent
+# ─────────────────────────────────────────────
+# All prompts use Python str.format() or Jinja2 syntax.
+# Variables in {curly_braces} are filled at runtime.
+
+# ── System Prompts ───────────────────────────
+
+system:
+  agent: |
+    You are an expert hardware design agent specializing in digital logic and AI accelerator architecture.
+    You design, verify, and optimize SystemVerilog modules for NPU/AI accelerator components.
+
+    Your capabilities:
+    - Generate synthesizable SystemVerilog RTL
+    - Write cocotb testbenches in Python
+    - Debug simulation failures from error logs
+    - Optimize designs for area, timing, and power
+    - Search technical documentation when needed
+
+    You ALWAYS respond with a structured JSON action. Never respond with plain text.
+
+    Available actions:
+    - SEARCH: Search web for technical information
+    - GENERATE_RTL: Generate SystemVerilog module
+    - GENERATE_TESTBENCH: Generate cocotb testbench
+    - SIMULATE: Run simulation
+    - SYNTHESIZE: Run synthesis
+    - DEBUG: Analyze and fix errors
+    - INSPECT_MEMORY: Query past designs or experiences
+    - OPTIMIZE: Improve an existing design
+    - COMPLETE: Task is finished
+
+    Response format:
+    ```json
+    {
+      "thinking": "Your step-by-step reasoning about what to do next",
+      "action": "ACTION_NAME",
+      "params": {
+        "key": "value"
+      }
+    }
+    ```
+
+# ── Planning Prompts ─────────────────────────
+
+planning:
+  decompose: |
+    Break down the following hardware design task into an ordered list of sub-tasks.
+    Each sub-task should be concrete and actionable.
+
+    Task: {task}
+
+    Consider:
+    1. What information do you need first? (search, documentation)
+    2. What modules need to be designed? (hierarchy)
+    3. What tests are needed? (verification plan)
+    4. What are the synthesis targets? (area, timing)
+
+    Respond with a JSON list:
+    ```json
+    {{
+      "steps": [
+        {{
+          "id": 1,
+          "description": "...",
+          "type": "search|generate|simulate|synthesize|optimize",
+          "depends_on": []
+        }}
+      ]
+    }}
+    ```
+
+  replan: |
+    The current plan needs adjustment based on feedback.
+
+    Original plan:
+    {plan}
+
+    Feedback / Error:
+    {feedback}
+
+    Create an updated plan that addresses the issues.
+    Keep completed steps and adjust remaining steps.
+
+# ── RTL Generation Prompts ───────────────────
+
+rtl:
+  generate_module: |
+    Generate a synthesizable SystemVerilog module based on the following specification.
+
+    Specification:
+    {spec}
+
+    Requirements:
+    - Use SystemVerilog syntax (not plain Verilog)
+    - Include proper `timescale directive
+    - Add clear comments for each section
+    - Use parameterized designs where appropriate
+    - Follow naming conventions: snake_case for signals, UPPER_CASE for parameters
+    - Ensure all outputs are driven in all paths (no latches unless intended)
+    - Include a reset (active-low `rst_n`)
+
+    {context}
+
+    Respond with ONLY the SystemVerilog code wrapped in ```systemverilog blocks.
+
+  generate_testbench: |
+    Generate a cocotb Python testbench for the following SystemVerilog module.
+
+    Module definition:
+    ```systemverilog
+    {module_code}
+    ```
+
+    Requirements:
+    - Test all major functionality
+    - Include edge cases
+    - Use cocotb assertions (assert)
+    - Include a reset sequence
+    - Test at least 20 random stimulus vectors
+    - Print clear pass/fail messages
+
+    Respond with ONLY the Python code wrapped in ```python blocks.
+
+  fix_errors: |
+    The following SystemVerilog code has errors. Fix them.
+
+    Code:
+    ```systemverilog
+    {code}
+    ```
+
+    Errors:
+    {errors}
+
+    Previous similar fixes from memory:
+    {similar_fixes}
+
+    Respond with the corrected SystemVerilog code wrapped in ```systemverilog blocks.
+    Also explain what you changed and why.
+
+# ── Debug Prompts ────────────────────────────
+
+debug:
+  analyze_error: |
+    Analyze the following simulation/compilation error and suggest a fix.
+
+    Error output:
+    ```
+    {error_output}
+    ```
+
+    Source code:
+    ```systemverilog
+    {source_code}
+    ```
+
+    Similar past errors and their fixes:
+    {similar_errors}
+
+    Respond with:
+    1. Root cause analysis
+    2. Suggested fix (specific code changes)
+    3. Confidence level (high/medium/low)
+
+  analyze_test_failure: |
+    A cocotb test has failed. Analyze the failure and suggest fixes.
+
+    Test output:
+    ```
+    {test_output}
+    ```
+
+    Testbench code:
+    ```python
+    {testbench_code}
+    ```
+
+    DUT code:
+    ```systemverilog
+    {dut_code}
+    ```
+
+    Determine if the bug is in:
+    - The RTL design (fix the design)
+    - The testbench (fix the test)
+    - Both
+
+# ── Optimization Prompts ─────────────────────
+
+optimization:
+  optimize_area: |
+    Optimize the following design for area (fewer gates/cells).
+
+    Current design:
+    ```systemverilog
+    {code}
+    ```
+
+    Current synthesis results:
+    - Cell count: {cell_count}
+    - Wire count: {wire_count}
+
+    Techniques to consider:
+    - Resource sharing (reuse adders/multipliers across clock cycles)
+    - State encoding optimization
+    - Removing redundant logic
+    - Using memory instead of registers for large storage
+
+  optimize_timing: |
+    Optimize the following design for timing (shorter critical path).
+
+    Current design:
+    ```systemverilog
+    {code}
+    ```
+
+    Current critical path: {critical_path_ns} ns
+    Target clock period: {target_ns} ns
+
+    Techniques to consider:
+    - Pipeline insertion
+    - Logic restructuring
+    - Reducing fan-out
+    - Balancing combinational paths
+
+# ── Context Building ─────────────────────────
+
+context:
+  memory_context: |
+    === Relevant Knowledge ===
+    {knowledge_snippets}
+
+    === Similar Past Designs ===
+    {similar_designs}
+
+    === Previous Errors & Fixes ===
+    {past_errors}

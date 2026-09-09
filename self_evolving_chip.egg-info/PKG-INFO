@@ -1,0 +1,163 @@
+Metadata-Version: 2.4
+Name: self-evolving-chip
+Version: 0.1.0
+Summary: A self-evolving hardware design agent powered by Qwen3-4B with memory, EDA tools, and a reward-driven learning loop.
+License: MIT
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: transformers>=4.51.0
+Requires-Dist: torch>=2.6.0
+Requires-Dist: accelerate>=0.30.0
+Requires-Dist: openai>=1.30.0
+Requires-Dist: chromadb>=0.5.0
+Requires-Dist: sentence-transformers>=3.0.0
+Requires-Dist: httpx>=0.27.0
+Requires-Dist: beautifulsoup4>=4.12.0
+Requires-Dist: duckduckgo-search>=6.0.0
+Requires-Dist: jinja2>=3.1.0
+Requires-Dist: cocotb>=1.9.0
+Requires-Dist: gitpython>=3.1.0
+Requires-Dist: pyyaml>=6.0
+Requires-Dist: pydantic>=2.5.0
+Requires-Dist: rich>=13.7.0
+Requires-Dist: click>=8.1.0
+Requires-Dist: python-dotenv>=1.0.0
+Provides-Extra: learning
+Requires-Dist: trl>=0.9.0; extra == "learning"
+Requires-Dist: peft>=0.11.0; extra == "learning"
+Requires-Dist: datasets>=2.19.0; extra == "learning"
+Requires-Dist: bitsandbytes>=0.43.0; extra == "learning"
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0.0; extra == "dev"
+Requires-Dist: pytest-asyncio>=0.23.0; extra == "dev"
+Requires-Dist: pytest-cov>=5.0.0; extra == "dev"
+Requires-Dist: ruff>=0.4.0; extra == "dev"
+
+# Self-Evolving Chip Design Agent 🧠⚡
+
+A **self-evolving hardware design agent** that uses Qwen3-4B as its reasoning core, surrounded by a memory system, EDA tools (Verilator, Cocotb, Yosys), a reward engine, and a learning loop. The agent iteratively designs, verifies, and optimizes digital hardware — learning from its own trajectories over time.
+
+> **Key Principle**: Qwen3-4B is NOT itself the self-evolving system.
+> The complete agent = **Qwen + Memory + Tools + Environment + Evaluator + Reward + Learning Loop**.
+
+## Architecture
+
+```
+                        ┌───────────────┐
+                        │  User / Task  │
+                        └───────┬───────┘
+                                │
+                        ┌───────▼───────┐
+                        │  Agent Loop   │
+                        │  (Planner +   │
+                        │   Router)     │
+                        └───────┬───────┘
+                                │
+               ┌────────────────┼────────────────┐
+               │                │                │
+        ┌──────▼──────┐  ┌─────▼─────┐  ┌───────▼───────┐
+        │  Qwen3-4B   │  │  Memory   │  │  Web Research │
+        │  Reasoning  │◄►│  System   │  │  (DuckDuckGo) │
+        └──────┬──────┘  └───────────┘  └───────────────┘
+               │
+      ┌────────┼────────┐
+      │        │        │
+  ┌───▼──┐ ┌──▼──┐ ┌───▼──┐
+  │Veril.│ │Yosys│ │Cocotb│
+  └───┬──┘ └──┬──┘ └───┬──┘
+      └────────┼────────┘
+           ┌───▼───┐
+           │Reward │──► Trajectory ──► Learning (SFT/GRPO)
+           └───────┘
+```
+
+## Quick Start
+
+```bash
+# 1. Install dependencies
+pip install -e .
+
+# 2. Check system status
+python main.py status
+
+# 3. Run the agent on a task
+python run_agent.py "Design a 4-bit ALU with add, subtract, AND, OR"
+
+# Or use the CLI
+python main.py run "Design a parameterized FIFO buffer"
+```
+
+## Prerequisites
+
+| Component | Required | Notes |
+|-----------|----------|-------|
+| Python 3.11+ | ✅ | Core runtime |
+| CUDA GPU (8GB+ VRAM) | ✅ | For Qwen3-4B inference |
+| Verilator 5+ | Phase 2+ | SystemVerilog simulation |
+| Yosys | Phase 4+ | Synthesis & area/timing |
+| Cocotb | Phase 3+ | Python-based verification |
+| Git | Recommended | Design version control |
+
+## Project Structure
+
+```
+self_evolving_chip/
+├── agent/           # 🧠 Agent core (Qwen, Planner, Router, Loop)
+├── memory/          # 💾 Three-tier memory (Knowledge, Experience, Design)
+├── web/             # 🌐 Web research (Search + Retrieval)
+├── rtl/             # ⚙️ RTL generation (SystemVerilog + Templates)
+├── tools/           # 🔧 EDA wrappers (Verilator, Cocotb, Yosys, Git)
+├── evaluator/       # 📊 Evaluation (Functional, Synthesis, Reward)
+├── learning/        # 🎓 Training scaffolds (SFT, GRPO)
+├── configs/         # ⚙️ Configuration (agent.yaml, prompts.yaml)
+├── tests/           # ✅ Test suite
+├── designs/         # 📐 Generated designs (git-tracked)
+├── trajectories/    # 📝 Episode recordings
+└── knowledge_base/  # 📚 Ingested documentation
+```
+
+## Development Roadmap
+
+| Phase | Description | Status |
+|-------|-------------|--------|
+| 1 | Qwen3-4B → Generate SystemVerilog | ✅ Built |
+| 2 | + Verilator (compile/sim) | ✅ Built |
+| 3 | + Cocotb (functional tests) | ✅ Built |
+| 4 | + Yosys (synthesis/area/timing) | ✅ Built |
+| 5 | + Memory system (RAG) | ✅ Built |
+| 6 | + Web research | ✅ Built |
+| 7 | Collect trajectories (1K→100K+) | 🔨 Next |
+| 8 | SFT / GRPO / RL training | 📋 Scaffold |
+| 9 | Multi-objective optimization | 📋 Planned |
+| 10 | FPGA prototype | 📋 Planned |
+| 11 | Specialized AI accelerator | 📋 Planned |
+| 12 | USB portable AI device | 📋 Planned |
+
+## Running Tests
+
+```bash
+# Install dev dependencies
+pip install -e ".[dev]"
+
+# Unit tests (no GPU/tools needed)
+pytest tests/test_qwen.py tests/test_evaluator.py tests/test_agent_loop.py -v
+
+# Memory tests (needs disk space for ChromaDB)
+pytest tests/test_memory.py -v
+
+# Full test suite (needs EDA tools for integration tests)
+pytest tests/ -v
+```
+
+## Configuration
+
+Edit `configs/agent.yaml` to customize:
+- **LLM**: Model name, backend (transformers/vllm), temperature
+- **Memory**: ChromaDB path, embedding model, chunk sizes
+- **Tools**: Verilator/Yosys binary paths, WSL2 mode, timeouts
+- **Evaluator**: Reward weights, quality thresholds, phase
+- **Learning**: SFT/GRPO hyperparameters
+
+## License
+
+MIT

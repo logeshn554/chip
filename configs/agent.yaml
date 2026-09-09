@@ -1,0 +1,126 @@
+# ─────────────────────────────────────────────
+# Self-Evolving Chip Agent — Master Configuration
+# ─────────────────────────────────────────────
+
+# ── LLM ──────────────────────────────────────
+llm:
+  # "transformers" for local HF inference, "vllm" for OpenAI-compatible API
+  backend: "transformers"
+  model_name: "Qwen/Qwen3-4B"
+  device_map: "auto"
+  torch_dtype: "auto"
+  max_new_tokens: 8192
+  temperature: 0.7
+  top_p: 0.9
+  enable_thinking: true
+
+  # vLLM-specific settings (used when backend == "vllm")
+  vllm:
+    base_url: "http://localhost:8000/v1"
+    api_key: "EMPTY"
+
+# ── Memory ───────────────────────────────────
+memory:
+  chroma_path: "./data/chroma"
+  embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
+
+  knowledge:
+    collection: "knowledge"
+    chunk_size: 512
+    chunk_overlap: 64
+
+  experience:
+    collection: "experience"
+    max_results: 10
+
+  design:
+    collection: "designs"
+    designs_dir: "./designs"
+
+  trajectory:
+    store_dir: "./trajectories"
+    format: "jsonl"
+
+# ── Web Research ─────────────────────────────
+web:
+  search_backend: "duckduckgo"    # "duckduckgo" | "serper" | "tavily"
+  max_results: 10
+  allowed_domains:
+    - "arxiv.org"
+    - "github.com"
+    - "docs.cocotb.org"
+    - "verilator.org"
+    - "yosyshq.readthedocs.io"
+    - "en.wikipedia.org"
+    - "stackoverflow.com"
+  rate_limit_seconds: 2.0
+  cache_dir: "./data/web_cache"
+
+# ── EDA Tools ────────────────────────────────
+tools:
+  # Set to "wsl" if tools run inside WSL2 on Windows
+  execution_env: "native"    # "native" | "wsl"
+
+  verilator:
+    binary: "verilator"
+    default_flags: ["--lint-only", "--Wall"]
+    sim_flags: ["--cc", "--exe", "--build", "--trace"]
+    timeout_seconds: 120
+
+  cocotb:
+    sim_build_dir: "./sim_build"
+    simulator: "verilator"
+    log_level: "INFO"
+
+  yosys:
+    binary: "yosys"
+    default_target: "generic"     # "generic" | "ice40" | "ecp5" | "xilinx"
+    timeout_seconds: 300
+
+  git:
+    designs_repo: "./designs"
+    auto_commit: true
+    tag_on_success: true
+
+# ── Evaluator ────────────────────────────────
+evaluator:
+  # Reward weights (must sum to 1.0)
+  reward_weights:
+    correctness: 0.5
+    area: 0.2
+    timing: 0.2
+    power: 0.1
+
+  # Thresholds for "pass"
+  thresholds:
+    compile: true                # must compile
+    lint_warnings_max: 5
+    test_pass_rate_min: 0.95     # 95% of tests must pass
+    area_max: 100000             # max cell count
+    timing_ns_max: 10.0          # max critical path (ns)
+
+  # Phase controls which reward components are active
+  reward_phase: 1                # 1 = correctness only, 2 = + synthesis
+
+# ── Agent Loop ───────────────────────────────
+agent:
+  max_iterations: 50
+  max_retries_per_step: 3
+  early_stop_reward: 0.95
+  log_level: "INFO"
+  save_all_trajectories: true
+
+# ── Learning ─────────────────────────────────
+learning:
+  min_episodes_for_sft: 100
+  reward_threshold_for_sft: 0.7
+  sft:
+    learning_rate: 2.0e-5
+    num_epochs: 3
+    lora_r: 16
+    lora_alpha: 32
+    batch_size: 4
+  grpo:
+    group_size: 4
+    learning_rate: 1.0e-5
+    kl_coeff: 0.1

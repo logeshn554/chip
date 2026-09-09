@@ -1,0 +1,55 @@
+{# Jinja2 template: MAC (Multiply-Accumulate) unit for AI inference #}
+`timescale 1ns / 1ps
+
+module {{ name | default("mac_unit") }} #(
+    parameter DATA_WIDTH = {{ data_width | default(8) }},
+    parameter ACC_WIDTH  = {{ acc_width | default(32) }}
+)(
+    input  logic                    clk,
+    input  logic                    rst_n,
+    input  logic                    enable,
+    input  logic                    clear_acc,
+
+    // Inputs
+    input  logic signed [DATA_WIDTH-1:0]  weight,
+    input  logic signed [DATA_WIDTH-1:0]  activation,
+
+    // Output
+    output logic signed [ACC_WIDTH-1:0]   accumulator,
+    output logic                          overflow
+);
+
+    // Internal product
+    logic signed [2*DATA_WIDTH-1:0] product;
+    logic signed [ACC_WIDTH-1:0]    next_acc;
+
+    // Multiply
+    assign product = weight * activation;
+
+    // Accumulate with overflow detection
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            accumulator <= '0;
+            overflow    <= 1'b0;
+        end else if (clear_acc) begin
+            accumulator <= '0;
+            overflow    <= 1'b0;
+        end else if (enable) begin
+            next_acc = accumulator + ACC_WIDTH'(product);
+
+            // Overflow detection
+            if ((accumulator[ACC_WIDTH-1] == product[2*DATA_WIDTH-1]) &&
+                (next_acc[ACC_WIDTH-1] != accumulator[ACC_WIDTH-1])) begin
+                overflow <= 1'b1;
+                // Saturate on overflow
+                accumulator <= accumulator[ACC_WIDTH-1] ?
+                    {1'b1, {(ACC_WIDTH-1){1'b0}}} :  // Min value
+                    {1'b0, {(ACC_WIDTH-1){1'b1}}};    // Max value
+            end else begin
+                accumulator <= next_acc;
+                overflow    <= 1'b0;
+            end
+        end
+    end
+
+endmodule
