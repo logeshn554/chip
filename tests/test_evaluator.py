@@ -148,3 +148,38 @@ class TestRewardEngine:
         assert engine.phase == 1
         engine.set_phase(2)
         assert engine.phase == 2
+
+    def test_modular_reward_weight_renormalization(self):
+        engine = RewardEngine()
+        # Area measured (500 cells), timing and power unavailable (None)
+        res = engine.compute_modular_reward(
+            compile_success=True,
+            test_pass_rate=1.0,
+            formal_status="SKIPPED",
+            area=500.0,
+            area_target=500.0,
+            timing_ns=None,
+            power_uw=None,
+        )
+        assert res.is_valid_hardware is True
+        # Effective weights must sum to 1.0
+        effective_w = res.breakdown["effective_weights"]
+        assert abs(sum(effective_w.values()) - 1.0) < 1e-3
+        # Timing and formal must be in unmeasured list, not receiving free 1.0 score
+        assert "timing" in res.breakdown["unmeasured_metrics"]
+        assert "formal" in res.breakdown["unmeasured_metrics"]
+        assert "timing" not in effective_w
+
+    def test_compute_v1_base_reward_with_auxiliary_formal(self):
+        engine = RewardEngine()
+        res = engine.compute_v1_reward(
+            compile_success=True,
+            all_functional_tests_pass=True,
+            synthesis_success=True,
+            lint_clean=True,
+            formal_pass=True,
+        )
+        assert res.base_reward_v1 == 8.0
+        assert res.total_reward == 8.0
+        assert res.formal_score == 1.0
+        assert res.breakdown["metric_type"] == "v1_8point_base_with_auxiliary_formal"

@@ -103,7 +103,7 @@ class ScrapeGraphAdapter:
 
     def __init__(
         self,
-        ollama_model: str = "qwen2.5-coder:3b",
+        ollama_model: str = "qwen3:4b",  # Aligned with main agent Qwen3-4B reasoning core
         max_page_bytes: int = 250_000,
         allowed_domains: list[str] | None = None,
         cache_dir: str = "./data/web_cache",
@@ -128,7 +128,7 @@ class ScrapeGraphAdapter:
         try:
             import scrapegraphai  # noqa: F401
             self._has_sgai = True
-            logger.info("ScrapeGraphAI package detected and enabled.")
+            logger.info("ScrapeGraphAI package detected and enabled as primary web research backend.")
         except ImportError:
             logger.info("ScrapeGraphAI package not installed. Using native ScrapeGraph adapter pipeline.")
 
@@ -233,7 +233,54 @@ class ScrapeGraphAdapter:
             logger.debug(f"Loaded web research from cache for {url}")
             return cached
 
+        # 2. Check domain allowlist
+        if not self.is_domain_allowed(url):
+            logger.warning(f"Domain not in allowlist for URL: {url}")
+            return CompactTechnicalContext(
+                query=focused_query,
+                source_url=url,
+                title="Blocked Domain",
+                extracted_summary="Domain is not in authoritative hardware allowlist.",
+            )
+
         source_item = self.source_tracker.register(url=url)
+
+        # 3. Primary Research Pipeline: ScrapeGraphAI SmartScraperGraph (direct URL access)
+        if self._has_sgai and url.startswith("http") and not fallback_content:
+            try:
+                from scrapegraphai.graphs import SmartScraperGraph  # type: ignore
+
+                graph_config = {
+                    "llm": {
+                        "model": f"ollama/{self.ollama_model}",
+                        "base_url": "http://localhost:11434",
+                        "temperature": 0.1,
+                    },
+                    "verbose": False,
+                    "headless": True,
+                }
+                smart_scraper = SmartScraperGraph(
+                    prompt=f"Extract only technical hardware design specifications, signal widths, and SystemVerilog constructs related to: {focused_query}",
+                    source=url,
+                    config=graph_config,
+                )
+                result = smart_scraper.run()
+                if result:
+                    summary_raw = json.dumps(result) if isinstance(result, dict) else str(result)
+                    cleaned_summary = self.filter.filter_and_compact(summary_raw, query=focused_query)
+                    ctx = CompactTechnicalContext(
+                        query=focused_query,
+                        source_url=url,
+                        title=source_item.title,
+                        extracted_summary=cleaned_summary[:1500],
+                        citation_id=source_item.citation_id,
+                    )
+                    self._save_to_cache(ctx)
+                    return ctx
+            except Exception as e:
+                logger.info(f"Primary ScrapeGraphAI pipeline unavailable or failed ({e}). Proceeding to native fallback.")
+
+        # 4. Fallback Research Pipeline: Native fetch -> ContentFilter -> Deduplicator
         raw_text = fallback_content or ""
         content_type = "text/html"
 
@@ -249,42 +296,6 @@ class ScrapeGraphAdapter:
                 citation_id=source_item.citation_id,
             )
             return ctx
-
-        # Try ScrapeGraphAI if installed
-        if self._has_sgai and url.startswith("http"):
-            try:
-                from scrapegraphai.graphs import SmartScraperGraph  # type: ignore
-
-                graph_config = {
-                    "llm": {
-                        "model": f"ollama/{self.ollama_model}",
-                        "base_url": "http://localhost:11434",
-                        "temperature": 0.1,
-                    },
-                    "verbose": False,
-                    "headless": True,
-                }
-                smart_scraper = SmartScraperGraph(
-                    prompt=f"Extract only technical hardware design specifications and SystemVerilog constructs related to: {focused_query}",
-                    source=url,
-                    config=graph_config,
-                )
-                result = smart_scraper.run()
-                if result:
-                    summary_text = json.dumps(result) if isinstance(result, dict) else str(result)
-                    ctx = CompactTechnicalContext(
-                        query=focused_query,
-                        source_url=url,
-                        title=source_item.title,
-                        extracted_summary=summary_text[:1500],
-                        citation_id=source_item.citation_id,
-                    )
-                    self._save_to_cache(ctx)
-                    return ctx
-            except Exception as e:
-                logger.warning(f"ScrapeGraphAI graph failed, falling back to native pipeline: {e}")
-
-        # Native targeted pipeline: ContentFilter + Deduplicator
         is_html = "html" in content_type.lower() or "<html" in raw_text.lower()
         extracted_dict = self.filter.extract_from_html(raw_text) if is_html else {
             "title": url,

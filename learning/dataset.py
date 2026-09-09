@@ -10,6 +10,7 @@ Transforms raw trajectory episodes into:
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import hashlib
 import json
 import logging
@@ -19,6 +20,33 @@ from typing import Any, Optional
 from agent.schemas import Episode, TrajectoryStep
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class RLTransition:
+    """Standardized Markov Decision Process (MDP) transition: (s_t, a_t, r_t, s_{t+1}, done)."""
+    state: dict[str, Any]
+    action: str
+    action_params: dict[str, Any]
+    reward: float
+    next_state: dict[str, Any]
+    done: bool
+    info: dict[str, Any]
+    episode_id: str
+    step_index: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "state": self.state,
+            "action": self.action,
+            "action_params": self.action_params,
+            "reward": self.reward,
+            "next_state": self.next_state,
+            "done": self.done,
+            "info": self.info,
+            "episode_id": self.episode_id,
+            "step_index": self.step_index,
+        }
 
 
 class TrajectoryDatasetBuilder:
@@ -184,6 +212,76 @@ class TrajectoryDatasetBuilder:
 
         logger.info(f"Built preference dataset: {len(dataset)} pairs")
         return dataset
+
+    def build_rl_transitions(
+        self,
+        episodes: list[Episode],
+    ) -> list[RLTransition]:
+        """Convert trajectory episodes into standardized (s_t, a_t, r_t, s_{t+1}, done) RL transitions.
+        
+        Transforms raw agent logs into an explicit RL transition dataset suitable for
+        offline RL, policy optimization (PPO/GRPO), and Q/value learning.
+        """
+        transitions = []
+
+        for ep in episodes:
+            num_steps = len(ep.steps)
+            for i, step in enumerate(ep.steps):
+                is_last_step = (i == num_steps - 1)
+                
+                # Current state representation
+                curr_state = {
+                    "task": ep.task,
+                    "step_index": step.step_index,
+                    "state_summary": step.state_summary,
+                }
+
+                # Next state representation
+                if not is_last_step:
+                    next_step = ep.steps[i + 1]
+                    next_state = {
+                        "task": ep.task,
+                        "step_index": next_step.step_index,
+                        "state_summary": next_step.state_summary,
+                        "last_observation": step.observation,
+                    }
+                else:
+                    next_state = {
+                        "task": ep.task,
+                        "step_index": step.step_index + 1,
+                        "state_summary": "terminal",
+                        "last_observation": step.observation,
+                    }
+
+                transition = RLTransition(
+                    state=curr_state,
+                    action=step.action,
+                    action_params=step.action_params,
+                    reward=step.reward,
+                    next_state=next_state,
+                    done=is_last_step or (step.action == "COMPLETE"),
+                    info={
+                        "model": ep.metadata.get("model", "Qwen3-4B"),
+                        "duration": getattr(ep, "duration_s", 0.0),
+                        "success": ep.success,
+                        "final_reward": ep.final_reward,
+                    },
+                    episode_id=ep.episode_id,
+                    step_index=step.step_index,
+                )
+                transitions.append(transition)
+
+        logger.info(f"Built {len(transitions)} standardized RL transitions from {len(episodes)} episodes.")
+        return transitions
+
+    def save_rl_transitions(
+        self,
+        transitions: list[RLTransition],
+        name: str = "rl_transitions",
+    ) -> str:
+        """Save RL transitions as JSONL dataset."""
+        dataset = [t.to_dict() for t in transitions]
+        return self.save_dataset(dataset, name=name, format="jsonl")
 
     def save_dataset(
         self,

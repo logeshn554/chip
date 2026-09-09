@@ -35,6 +35,7 @@ class BenchmarkTask:
     reference_rtl: str
     public_tests: list[dict[str, Any]] = field(default_factory=list)
     held_out_tests: list[dict[str, Any]] = field(default_factory=list)
+    formal_properties: str = ""  # Separate SystemVerilog formal property specification
 
     def get_public_spec(self) -> str:
         """Text presented to the agent without exposing held-out test vectors."""
@@ -86,6 +87,7 @@ endmodule
 """,
             public_tests=[{"a": 0, "expected_y": 1}],
             held_out_tests=[{"a": 1, "expected_y": 0}],
+            formal_properties="always_comb assert property (y == ~a);",
         ))
 
         self._register(BenchmarkTask(
@@ -107,6 +109,7 @@ endmodule
 """,
             public_tests=[{"a": 3, "b": 1, "expected_and": 1, "expected_or": 3}],
             held_out_tests=[{"a": 0, "b": 2, "expected_and": 0, "expected_or": 2}],
+            formal_properties="always_comb begin assert property (y_and == (a & b)); assert property (y_or == (a | b)); end",
         ))
 
         self._register(BenchmarkTask(
@@ -313,6 +316,7 @@ endmodule
                 {"a": -128, "b": -128, "acc_in": 0, "expected": 16384},
                 {"a": -128, "b": 127, "acc_in": 0, "expected": -16256},
             ],
+            formal_properties="always @(posedge clk) if (!rst_n) assert property (accum == '0); else if ($past(rst_n) && $past(valid_in)) assert property (accum == $past(accum) + ($past(a) * $past(b)));",
         ))
 
         # ─────────────────────────────────────────────────────────────

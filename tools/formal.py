@@ -42,9 +42,24 @@ class FormalVerificationTool:
         rtl_file: str,
         depth: int = 20,
         engine: str = "smtbmc",
+        properties_file: Optional[str] = None,
     ) -> str:
-        """Generate a standard SymbiYosys .sby configuration."""
+        """Generate a standard SymbiYosys .sby configuration with optional external properties."""
         abs_rtl = os.path.abspath(rtl_file).replace("\\", "/")
+        
+        script_lines = [f"read -formal {os.path.basename(abs_rtl)}"]
+        files_lines = [abs_rtl]
+
+        if properties_file and os.path.exists(properties_file):
+            abs_prop = os.path.abspath(properties_file).replace("\\", "/")
+            script_lines.append(f"read -formal {os.path.basename(abs_prop)}")
+            files_lines.append(abs_prop)
+
+        script_lines.append(f"prep -top {top_module}")
+
+        script_str = "\n".join(script_lines)
+        files_str = "\n".join(files_lines)
+
         config_text = f"""[options]
 mode bmc
 depth {depth}
@@ -53,11 +68,10 @@ depth {depth}
 {engine}
 
 [script]
-read -formal {os.path.basename(abs_rtl)}
-prep -top {top_module}
+{script_str}
 
 [files]
-{abs_rtl}
+{files_str}
 """
         return config_text
 
@@ -80,8 +94,13 @@ prep -top {top_module}
         top_module: str = "mac",
         depth: int = 20,
         timeout: float = 60.0,
+        external_properties: Optional[str] = None,
+        external_properties_file: Optional[str] = None,
     ) -> dict[str, Any]:
         """Run formal verification on target SystemVerilog module.
+
+        Supports external formal property specifications outside the generated RTL,
+        ensuring model-generated assertions cannot game the verification criteria.
 
         Returns structured dictionary:
         {
@@ -113,6 +132,18 @@ prep -top {top_module}
             code = f.read()
 
         formal_meta = self.check_embedded_formal_properties(code)
+        
+        # Check external properties if provided
+        external_prop_file_to_use = external_properties_file
+        job_dir = os.path.join(self.work_dir, f"job_{top_module}")
+        os.makedirs(job_dir, exist_ok=True)
+
+        if external_properties:
+            external_prop_file_to_use = os.path.join(job_dir, f"{top_module}_formal_spec.sv")
+            with open(external_prop_file_to_use, "w", encoding="utf-8") as f:
+                f.write(external_properties)
+            ext_meta = self.check_embedded_formal_properties(external_properties)
+            formal_meta["num_assertions"] += ext_meta["num_assertions"]
 
         # If sby binary is NOT available, report SKIPPED (never falsely claim PASS)
         if not self._has_binary:
@@ -126,7 +157,7 @@ prep -top {top_module}
                 "counterexample": None,
                 "output": (
                     "SymbiYosys (sby) is not installed on host. "
-                    f"RTL contains {formal_meta['num_assertions']} formal assertion(s). "
+                    f"RTL & spec contain {formal_meta['num_assertions']} formal assertion(s). "
                     "Verification stage was SKIPPED."
                 ),
                 "errors": [],
@@ -134,9 +165,12 @@ prep -top {top_module}
             }
 
         # Sby is available: create job and execute
-        sby_config = self.generate_sby_config(top_module, file_path, depth=depth)
-        job_dir = os.path.join(self.work_dir, f"job_{top_module}")
-        os.makedirs(job_dir, exist_ok=True)
+        sby_config = self.generate_sby_config(
+            top_module=top_module,
+            rtl_file=file_path,
+            depth=depth,
+            properties_file=external_prop_file_to_use,
+        )
         sby_file = os.path.join(job_dir, f"{top_module}.sby")
 
         with open(sby_file, "w", encoding="utf-8") as f:

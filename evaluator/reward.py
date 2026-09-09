@@ -34,8 +34,9 @@ class GroundedRewardResult:
     functional_score: float    # 0 to 5
     synthesis_score: float     # 0 or 1
     lint_score: float          # 0 or 1
-    formal_score: float = 0.0  # 0 or 1
-    total_reward: float = 0.0  # R = compile + functional + synthesis + lint (+ formal)
+    formal_score: float = 0.0  # Auxiliary formal verification metric (0 or 1)
+    base_reward_v1: float = 0.0  # R = compile + functional + synthesis + lint (Max = 8.0)
+    total_reward: float = 0.0  # Total reward for current evaluation mode
     normalized_reward: float = 0.0  # 0.0 to 1.0
     is_valid_hardware: bool = False
     breakdown: dict[str, Any] = field(default_factory=dict)
@@ -66,7 +67,7 @@ class RewardEngine:
             "power": raw_weights.get("power", 0.05),
         }
 
-        # Normalize weights so sum == 1.0
+        # Normalize configured weights so sum == 1.0
         total_w = sum(self.weights.values())
         if total_w > 0:
             self.weights = {k: v / total_w for k, v in self.weights.items()}
@@ -89,11 +90,17 @@ class RewardEngine:
         lint_clean: bool,
         formal_pass: Optional[bool] = None,
     ) -> GroundedRewardResult:
-        """Version 1 grounded reward: R = compile + functional + synthesis + lint.
-
-        Strict Hard Gate:
+        """Version 1 grounded reward: R = compile(1) + functional(5) + synthesis(1) + lint(1).
+        
+        Semantics:
+        - Base reward: 8-point base reward.
+        - Formal verification: Reported as an auxiliary metric (formal_score).
+          Formal verification does not silently alter the 8-point base scale, preventing
+          ambiguity between base verification and multi-objective RL reward.
+        
+        Strict Hard Gates:
         - If compile_success is False, functional and synthesis rewards are clamped to 0.
-        - If all_functional_tests_pass is False, hardware is invalid (synthesis reward capped).
+        - If all_functional_tests_pass is False, hardware is invalid.
         """
         c = 1.0 if compile_success else 0.0
         f = 5.0 if (compile_success and all_functional_tests_pass) else 0.0
@@ -106,20 +113,22 @@ class RewardEngine:
             f = 0.0
             s = min(s, 0.5)
 
-        total = c + f + s + l
-        normalized = total / 8.0
+        base_total = c + f + s + l
+        normalized = base_total / 8.0
 
         breakdown = {
+            "metric_type": "v1_8point_base_with_auxiliary_formal",
             "compile_success": c,
             "all_functional_tests_pass": f,
             "synthesis_success": s,
             "lint_clean": l,
             "formal_pass": formal_sc if formal_pass is not None else "SKIPPED",
+            "auxiliary_formal_score": formal_sc,
             "compile": c,
             "functional": f,
             "synthesis": s,
             "lint": l,
-            "formula": "R = compile(1) + functional(5) + synthesis(1) + lint(1)",
+            "formula": "R_base = compile(1) + functional(5) + synthesis(1) + lint(1) (Max 8.0); formal is auxiliary",
         }
 
         return GroundedRewardResult(
@@ -128,7 +137,8 @@ class RewardEngine:
             synthesis_score=s,
             lint_score=l,
             formal_score=formal_sc,
-            total_reward=round(total, 4),
+            base_reward_v1=round(base_total, 4),
+            total_reward=round(base_total, 4),
             normalized_reward=round(normalized, 4),
             is_valid_hardware=is_valid,
             breakdown=breakdown,
@@ -198,39 +208,65 @@ class RewardEngine:
                 is_valid_hardware=False,
                 breakdown={"gate_failed": "Formal assertion violation detected by SymbiYosys."},
             )
-        else:
-            # SKIPPED or UNAVAILABLE: do not penalize, use neutral 1.0 for weight re-normalization
-            r_formal = 1.0
+        # Multi-objective active metric weight re-normalization:
+        # Never award free 1.0 points to unmeasured/unavailable metrics.
+        # Instead, dynamically re-distribute weights strictly across measured objectives.
+        active_objectives: dict[str, tuple[float, float]] = {}  # metric -> (raw_weight, score)
 
-        # Area score: smaller is better (bounded in [0, 1])
+        # 1. Correctness (Functional & Compile) is always active once hard gates pass
+        active_objectives["correctness"] = (self.w_correctness, r_correctness)
+
+        # 2. Formal Verification (active only if tool actually ran and PASSED)
+        if formal_status == "PASS":
+            active_objectives["formal"] = (self.w_formal, 1.0)
+            r_formal = 1.0
+        else:
+            r_formal = 0.0  # SKIPPED or UNAVAILABLE: not active, weight redistributed
+
+        # 3. Area (Active only if synthesized cell count or area was measured)
         if area is not None and area > 0:
             r_area = max(0.0, min(1.0, area_target / area))
+            active_objectives["area"] = (self.w_area, r_area)
         else:
-            r_area = 1.0  # neutral if unavailable (do not invent fake area)
+            r_area = 0.0
 
-        # Timing score: lower critical path is better
+        # 4. Timing (Active only if critical path was measured)
         if timing_ns is not None and timing_ns > 0:
             r_timing = max(0.0, min(1.0, timing_target / timing_ns))
+            active_objectives["timing"] = (self.w_timing, r_timing)
         else:
-            r_timing = 1.0
+            r_timing = 0.0
 
-        # Power score: do not invent fake numbers
-        r_power = 1.0
+        # 5. Power (Active only if power was reliably measured/estimated)
+        if power_uw is not None and power_uw > 0:
+            power_target = 1000.0
+            r_power = max(0.0, min(1.0, power_target / power_uw))
+            active_objectives["power"] = (self.w_power, r_power)
+        else:
+            r_power = 0.0
 
-        total = (
-            self.w_correctness * r_correctness
-            + self.w_formal * r_formal
-            + self.w_area * r_area
-            + self.w_timing * r_timing
-            + self.w_power * r_power
-        )
+        # Dynamically re-normalize weights over active objectives (sum == 1.0)
+        sum_active_weights = sum(w for w, _ in active_objectives.values())
+        if sum_active_weights > 0:
+            effective_weights = {k: round(w / sum_active_weights, 4) for k, (w, _) in active_objectives.items()}
+            total = sum((w / sum_active_weights) * score for w, score in active_objectives.values())
+        else:
+            effective_weights = {"correctness": 1.0}
+            total = r_correctness
+
+        unmeasured = [m for m in ["formal", "area", "timing", "power"] if m not in active_objectives]
 
         breakdown = {
-            "w_correctness": self.w_correctness,
-            "w_formal": self.w_formal,
-            "w_area": self.w_area,
-            "w_timing": self.w_timing,
-            "w_power": self.w_power,
+            "configured_weights": {
+                "correctness": self.w_correctness,
+                "formal": self.w_formal,
+                "area": self.w_area,
+                "timing": self.w_timing,
+                "power": self.w_power,
+            },
+            "active_metrics": list(active_objectives.keys()),
+            "effective_weights": effective_weights,
+            "unmeasured_metrics": unmeasured,
             "r_correctness": r_correctness,
             "r_formal": r_formal,
             "r_area": r_area,
@@ -243,7 +279,7 @@ class RewardEngine:
         return GroundedRewardResult(
             compile_score=1.0,
             functional_score=5.0,
-            synthesis_score=1.0,
+            synthesis_score=1.0 if (area is not None and area > 0) else 0.5,
             lint_score=1.0,
             formal_score=r_formal,
             total_reward=round(total * 8.0, 4),

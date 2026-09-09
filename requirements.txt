@@ -19,5 +19,8 @@ pytest-asyncio>=0.21.0
 # Targeted Web Research
 scrapegraphai>=1.8.0
 
+# Reinforcement Learning Environment
+gymnasium>=0.29.0
+
 # Optional Learning Dependencies:
 # pip install trl peft datasets bitsandbytes

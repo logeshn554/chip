@@ -1,21 +1,21 @@
 """
-Hardware Design RL Environment — Gym-compatible environment foundation for GRPO/RL.
+Hardware Design RL Environment — Gymnasium Environment for Hardware Agent Training.
 
-Exposes standard RL interface:
-- reset() -> observation
-- step(action) -> (next_observation, reward, done, info)
+Implements an official Gymnasium Environment (gymnasium.Env):
+- reset(seed=None, options=None) -> (observation, info)
+- step(action) -> (observation, reward, terminated, truncated, info)
 
-Supported Action Space:
-- SEARCH_WEB
-- RETRIEVE_MEMORY
-- GENERATE_RTL
-- EDIT_RTL
-- SIMULATE
-- TEST
-- FORMAL_VERIFY
-- SYNTHESIZE
-- COMPARE_DESIGNS
-- COMPLETE
+Supported Action Space (Discrete 10 or typed action names):
+0: SEARCH_WEB
+1: RETRIEVE_MEMORY
+2: GENERATE_RTL
+3: EDIT_RTL
+4: SIMULATE
+5: TEST
+6: FORMAL_VERIFY
+7: SYNTHESIZE
+8: COMPARE_DESIGNS
+9: COMPLETE
 
 Uses deterministic evaluator feedback from Verilator, Cocotb, Yosys, and Formal tools.
 Maintains true reward accumulation: episode_return += step_reward.
@@ -27,7 +27,19 @@ import asyncio
 import logging
 import os
 import shutil
-from typing import Any, Optional, Tuple
+from typing import Any, Optional, Tuple, Union
+
+try:
+    import gymnasium as gym
+    from gymnasium import spaces
+    HAS_GYMNASIUM = True
+except ImportError:
+    # Graceful fallback if gymnasium is not installed
+    class gym:  # type: ignore
+        class Env:
+            pass
+    spaces = None  # type: ignore
+    HAS_GYMNASIUM = False
 
 from agent.schemas import ActionStatus, ActionType, ActionResult
 from evaluator.reward import RewardEngine
@@ -41,8 +53,10 @@ from memory.design_store import DesignStore
 logger = logging.getLogger(__name__)
 
 
-class HardwareDesignEnv:
-    """Gym-compatible reinforcement learning environment for hardware design tasks."""
+class HardwareDesignEnv(gym.Env):
+    """Gymnasium reinforcement learning environment for autonomous hardware design tasks."""
+
+    metadata = {"render_modes": []}
 
     ACTION_SPACE = [
         "SEARCH_WEB",
@@ -64,6 +78,7 @@ class HardwareDesignEnv:
         max_steps: int = 15,
         target_module: str = "mac",
     ):
+        super().__init__()
         self.task = task
         self.work_dir = work_dir
         self.max_steps = max_steps
@@ -71,7 +86,19 @@ class HardwareDesignEnv:
 
         os.makedirs(work_dir, exist_ok=True)
 
-        # Tools
+        # Standard Gymnasium spaces
+        if HAS_GYMNASIUM:
+            self.action_space = spaces.Discrete(len(self.ACTION_SPACE))
+            self.observation_space = spaces.Dict({
+                "step": spaces.Box(low=0, high=max_steps + 1, shape=(), dtype=int),
+                "best_reward": spaces.Box(low=0.0, high=8.0, shape=(), dtype=float),
+                "current_reward": spaces.Box(low=0.0, high=8.0, shape=(), dtype=float),
+            })
+        else:
+            self.action_space = len(self.ACTION_SPACE)
+            self.observation_space = None
+
+        # Dedicated tool wrappers
         self.verilator = VerilatorTool(work_dir=os.path.join(work_dir, "sim"))
         self.cocotb = CocotbTool(sim_dir=os.path.join(work_dir, "sim"))
         self.yosys = YosysTool(work_dir=os.path.join(work_dir, "synth"))
@@ -90,8 +117,15 @@ class HardwareDesignEnv:
         self.is_done = False
         self.history: list[dict[str, Any]] = []
 
-    def reset(self) -> dict[str, Any]:
-        """Reset environment for a new episode and return initial observation."""
+    def reset(
+        self,
+        seed: Optional[int] = None,
+        options: Optional[dict[str, Any]] = None,
+    ) -> Tuple[dict[str, Any], dict[str, Any]]:
+        """Reset environment for a new episode and return (observation, info)."""
+        if HAS_GYMNASIUM and hasattr(super(), "reset"):
+            super().reset(seed=seed)
+
         self.current_step = 0
         self.episode_return = 0.0
         self.best_design_reward = 0.0
@@ -103,7 +137,10 @@ class HardwareDesignEnv:
         # Reset working RTL file
         self.current_rtl_path = os.path.join(self.work_dir, f"{self.target_module}.sv")
         if os.path.exists(self.current_rtl_path):
-            os.remove(self.current_rtl_path)
+            try:
+                os.remove(self.current_rtl_path)
+            except Exception:
+                pass
 
         observation = {
             "task": self.task,
@@ -111,12 +148,24 @@ class HardwareDesignEnv:
             "current_rtl": "",
             "last_error": "",
             "best_reward": 0.0,
+            "current_reward": 0.0,
             "status": "ready",
         }
-        return observation
+        info = {
+            "task": self.task,
+            "target_module": self.target_module,
+            "max_steps": self.max_steps,
+        }
+        return observation, info
 
-    async def step_async(self, action: dict[str, Any] | str) -> Tuple[dict[str, Any], float, bool, dict[str, Any]]:
-        """Execute an environment step asynchronously."""
+    async def step_async(
+        self,
+        action: Union[int, str, dict[str, Any]],
+    ) -> Tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
+        """Execute an environment step asynchronously.
+        
+        Returns standard Gymnasium 5-tuple: (observation, reward, terminated, truncated, info).
+        """
         if self.is_done:
             raise RuntimeError("Cannot step in an environment that is already done. Call reset() first.")
 
@@ -124,7 +173,13 @@ class HardwareDesignEnv:
         action_name = ""
         params: dict[str, Any] = {}
 
-        if isinstance(action, str):
+        # Parse action from int, str, or dict
+        if isinstance(action, int):
+            if 0 <= action < len(self.ACTION_SPACE):
+                action_name = self.ACTION_SPACE[action]
+            else:
+                action_name = "UNKNOWN"
+        elif isinstance(action, str):
             action_name = action.upper().strip()
         elif isinstance(action, dict):
             action_name = str(action.get("action", "")).upper().strip()
@@ -134,10 +189,10 @@ class HardwareDesignEnv:
         info: dict[str, Any] = {"action": action_name, "step": self.current_step}
 
         # ── Handle Actions ───────────────────────────────────────────
-        if action_name == "GENERATE_RTL" or action_name == "EDIT_RTL":
+        if action_name in ["GENERATE_RTL", "EDIT_RTL"]:
             code = params.get("code", "")
             if not code and "mac" in self.target_module:
-                # Reference MAC code
+                # Synthesizable MAC reference code
                 code = (
                     "`timescale 1ns / 1ps\n"
                     "module mac #(\n"
@@ -227,7 +282,7 @@ class HardwareDesignEnv:
                     step_reward = -1.0  # violation
             info["formal_status"] = res.get("status", "SKIPPED") if 'res' in locals() else "ERROR"
 
-        elif action_name == "RETRIEVE_MEMORY" or action_name == "SEARCH_WEB":
+        elif action_name in ["RETRIEVE_MEMORY", "SEARCH_WEB"]:
             step_reward = 0.05  # slight exploration incentive
             info["query"] = params.get("query", self.task)
 
@@ -237,8 +292,9 @@ class HardwareDesignEnv:
             if self.current_design_reward >= 7.0:
                 step_reward = 1.0  # terminal bonus for valid verified design
 
-        # Check step bounds
-        if self.current_step >= self.max_steps:
+        terminated = self.is_done
+        truncated = self.current_step >= self.max_steps
+        if truncated:
             self.is_done = True
 
         # Accumulate reward
@@ -259,12 +315,18 @@ class HardwareDesignEnv:
             "last_error": self.last_error,
             "best_reward": self.best_design_reward,
             "current_reward": self.current_design_reward,
-            "status": "done" if self.is_done else "in_progress",
+            "status": "done" if (terminated or truncated) else "in_progress",
         }
 
         self.history.append({"step": self.current_step, "action": action_name, "reward": step_reward})
-        return next_obs, step_reward, self.is_done, info
+        return next_obs, step_reward, terminated, truncated, info
 
-    def step(self, action: dict[str, Any] | str) -> Tuple[dict[str, Any], float, bool, dict[str, Any]]:
-        """Synchronous wrapper for step_async."""
+    def step(
+        self,
+        action: Union[int, str, dict[str, Any]],
+    ) -> Tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
+        """Synchronous wrapper for step_async returning Gymnasium 5-tuple:
+        
+        (observation, reward, terminated, truncated, info)
+        """
         return asyncio.run(self.step_async(action))

@@ -51,3 +51,16 @@ class TestFormalVerificationTool:
         res = await tool.verify("non_existent_file_xyz.sv")
         assert res["status"] == "ERROR"
         assert "not found" in res["output"].lower()
+
+    @pytest.mark.asyncio
+    async def test_external_properties_binding(self, tmp_path):
+        tool = FormalVerificationTool(sby_binary="non_existent_sby_binary_12345", work_dir=str(tmp_path))
+        test_file = tmp_path / "mac.sv"
+        test_file.write_text("module mac (input logic clk, output logic out); endmodule")
+
+        external_spec = "module formal_spec; assert property (@(posedge clk) out == 0); endmodule"
+        res = await tool.verify(str(test_file), top_module="mac", external_properties=external_spec)
+        assert res["status"] == "SKIPPED"
+        # Properties checked must account for the external specification
+        assert res["properties_checked"] >= 1
+        assert os.path.exists(tmp_path / "job_mac" / "mac_formal_spec.sv")
