@@ -1,0 +1,55 @@
+"""
+Abstract LLM interface for the Hardware Design Agent.
+Decouples agent reasoning and planning from specific LLM providers/backends.
+"""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Any, Optional
+
+
+@dataclass
+class Message:
+    """Chat message structure."""
+    role: str  # "system", "user", "assistant"
+    content: str
+
+
+@dataclass
+class LLMResponse:
+    """Standardized response from the LLM."""
+    text: str
+    raw_response: Optional[dict[str, Any]] = None
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    finish_reason: str = "stop"
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+class LLMInterface(ABC):
+    """Abstract base class for LLM client implementations."""
+
+    @abstractmethod
+    async def generate(self, prompt: str, **kwargs: Any) -> LLMResponse:
+        """Generate a completion for the given prompt."""
+        pass
+
+    @abstractmethod
+    async def chat(self, messages: list[Message | dict[str, str]], **kwargs: Any) -> LLMResponse:
+        """Generate a response given a list of chat messages."""
+        pass
+
+    @abstractmethod
+    async def generate_json(
+        self, prompt: str, schema: Optional[dict[str, Any]] = None, **kwargs: Any
+    ) -> dict[str, Any]:
+        """Generate structured JSON response adhering to an optional schema."""
+        pass
+
+    @abstractmethod
+    def count_tokens(self, text: str) -> int:
+        """Estimate token count for context budgeting."""
+        pass

@@ -1,147 +1,175 @@
 """
-Reward Engine — computes the reward signal for the agent.
+Reward Engine — Grounded hardware evaluation and scoring.
 
-Combines functional correctness and synthesis quality scores
-into a single reward value using configurable weights.
-Supports two phases:
-  Phase 1: Correctness only (compile + tests)
-  Phase 2: Correctness + synthesis (area + timing + power)
+Supports:
+1. Version 1 Grounded Formula (milestone specification):
+   - compile_success = 1
+   - all_functional_tests_pass = 5
+   - synthesis_success = 1
+   - lint_clean = 1
+   Total initial reward: R = compile + functional + synthesis + lint (Max = 8.0)
+
+2. Multi-Objective / Phased scoring:
+   - Phase 1: Correctness only (compile + tests)
+   - Phase 2: Correctness + synthesis (area + timing + power)
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import logging
-from typing import Any
-
-from agent.schemas import EvaluationResult, FunctionalScore, SynthesisScore
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class GroundedRewardResult:
+    """Detailed breakdown of tool-grounded reward calculation."""
+    compile_score: float  # 0 or 1
+    functional_score: float  # 0 to 5
+    synthesis_score: float  # 0 or 1
+    lint_score: float  # 0 or 1
+    total_reward: float  # R = compile + functional + synthesis + lint
+    normalized_reward: float  # 0.0 to 1.0
+    is_valid_hardware: bool
+    breakdown: dict[str, Any] = field(default_factory=dict)
+
+
 class RewardEngine:
-    """Computes the reward signal for the self-evolving agent.
+    """Computes grounded reward strictly derived from EDA tool outputs."""
 
-    The reward function evolves with the agent:
-    - Phase 1: R = R_compile + R_functional
-    - Phase 2: R = w1*R_correctness + w2*R_area + w3*R_timing + w4*R_power
-
-    This lets the agent move from "correct hardware" to "better hardware".
-    """
-
-    def __init__(self, config: dict[str, Any] | None = None):
-        config = config or {}
-
-        # Reward weights
-        weights = config.get("reward_weights", {})
-        self.w_correctness = weights.get("correctness", 0.5)
-        self.w_area = weights.get("area", 0.2)
-        self.w_timing = weights.get("timing", 0.2)
-        self.w_power = weights.get("power", 0.1)
-
-        # Phase (1 = correctness only, 2 = + synthesis)
-        self.phase = config.get("reward_phase", 1)
-
-        logger.info(f"RewardEngine: phase={self.phase}, weights=({self.w_correctness}, {self.w_area}, {self.w_timing}, {self.w_power})")
-
-    def compute(
+    def __init__(
         self,
-        functional: FunctionalScore,
-        synthesis: SynthesisScore | None = None,
-    ) -> EvaluationResult:
-        """Compute the reward for a design evaluation.
-
-        Args:
-            functional: Functional correctness score
-            synthesis: Optional synthesis quality score (Phase 2+)
-
-        Returns:
-            EvaluationResult with reward and breakdown
-        """
-        breakdown = {}
-
-        if self.phase == 1:
-            # Phase 1: Correctness only
-            reward = functional.score
-            breakdown = {
-                "compile": 0.3 if functional.compile_pass else 0.0,
-                "lint": 0.1 if functional.lint_pass else 0.0,
-                "tests": 0.6 * functional.test_pass_rate,
-                "total": reward,
-            }
-
+        config: dict[str, Any] | None = None,
+        mode: str = "v1",
+        weights: Optional[dict[str, float]] = None,
+    ):
+        if isinstance(config, dict):
+            self.phase = config.get("reward_phase", 1)
+            raw_weights = config.get("reward_weights", {})
         else:
-            # Phase 2: Correctness + Synthesis
-            r_correctness = functional.score
+            self.phase = 1
+            raw_weights = {}
 
-            if synthesis and synthesis.synthesizable:
-                r_area = synthesis.area_score
-                r_timing = synthesis.timing_score
-                r_power = synthesis.power_score
-            else:
-                r_area = 0.0
-                r_timing = 0.0
-                r_power = 0.0
-
-            reward = (
-                self.w_correctness * r_correctness
-                + self.w_area * r_area
-                + self.w_timing * r_timing
-                + self.w_power * r_power
-            )
-
-            breakdown = {
-                "correctness": self.w_correctness * r_correctness,
-                "area": self.w_area * r_area,
-                "timing": self.w_timing * r_timing,
-                "power": self.w_power * r_power,
-                "total": reward,
-            }
-
-        # Apply reward shaping
-        reward = self._shape_reward(reward, functional, synthesis)
-
-        result = EvaluationResult(
-            functional=functional,
-            synthesis=synthesis or SynthesisScore(),
-            reward=reward,
-            reward_breakdown=breakdown,
-        )
-
-        logger.info(f"Reward: {reward:.3f} (breakdown: {breakdown})")
-        return result
-
-    def _shape_reward(
-        self,
-        base_reward: float,
-        functional: FunctionalScore,
-        synthesis: SynthesisScore | None,
-    ) -> float:
-        """Apply reward shaping for better learning signals.
-
-        - Partial credit for partial compilation
-        - Bonus for improving test pass rate
-        - Penalty for excessive warnings
-        """
-        reward = base_reward
-
-        # Bonus: if all tests pass, small bonus
-        if functional.test_pass_rate >= 1.0 and functional.compile_pass:
-            reward = min(1.0, reward + 0.05)
-
-        # Penalty: excessive lint warnings
-        if functional.lint_warnings > 10:
-            reward *= 0.95
-
-        # Ensure reward stays in [0, 1]
-        reward = max(0.0, min(1.0, reward))
-
-        return reward
+        self.mode = mode
+        self.weights = weights or {
+            "correctness": raw_weights.get("correctness", 0.5),
+            "area": raw_weights.get("area", 0.2),
+            "timing": raw_weights.get("timing", 0.2),
+            "power": raw_weights.get("power", 0.1),
+            "resource_efficiency": raw_weights.get("resource_efficiency", 0.05),
+        }
+        self.w_correctness = self.weights.get("correctness", 0.5)
+        self.w_area = self.weights.get("area", 0.2)
+        self.w_timing = self.weights.get("timing", 0.2)
+        self.w_power = self.weights.get("power", 0.1)
 
     def set_phase(self, phase: int) -> None:
-        """Switch the reward phase.
-
-        Phase 1: Correctness only
-        Phase 2: Correctness + synthesis
-        """
+        """Set the reward phase (1: correctness only, 2: correctness + synthesis)."""
         self.phase = phase
-        logger.info(f"Reward phase set to {phase}")
+
+    def compute_v1_reward(
+        self,
+        compile_success: bool,
+        all_functional_tests_pass: bool,
+        synthesis_success: bool,
+        lint_clean: bool,
+    ) -> GroundedRewardResult:
+        """Version 1 grounded reward: R = compile + functional + synthesis + lint."""
+        c = 1.0 if compile_success else 0.0
+        f = 5.0 if all_functional_tests_pass else 0.0
+        s = 1.0 if (synthesis_success and all_functional_tests_pass) else (0.5 if synthesis_success else 0.0)
+        l = 1.0 if lint_clean else 0.0
+
+        is_valid = bool(compile_success and all_functional_tests_pass)
+        if not is_valid:
+            f = 0.0
+            s = min(s, 0.5)
+
+        total = c + f + s + l
+        normalized = total / 8.0
+
+        breakdown = {
+            "compile_success": c,
+            "all_functional_tests_pass": f,
+            "synthesis_success": s,
+            "lint_clean": l,
+            "compile": c,
+            "functional": f,
+            "synthesis": s,
+            "lint": l,
+            "formula": "R = compile(1) + functional(5) + synthesis(1) + lint(1)",
+        }
+
+        return GroundedRewardResult(
+            compile_score=c,
+            functional_score=f,
+            synthesis_score=s,
+            lint_score=l,
+            total_reward=round(total, 4),
+            normalized_reward=round(normalized, 4),
+            is_valid_hardware=is_valid,
+            breakdown=breakdown,
+        )
+
+    def compute(self, functional: Any, synthesis: Any = None) -> Any:
+        """Compute evaluation score for Phase 1 / Phase 2 dataclass inputs."""
+        from agent.schemas import EvaluationResult, FunctionalScore, SynthesisScore
+
+        compile_pass = getattr(functional, "compile_pass", False) if functional else False
+        lint_pass = getattr(functional, "lint_pass", False) if functional else False
+        test_pass_rate = getattr(functional, "test_pass_rate", 0.0) if functional else 0.0
+        tests_passed = getattr(functional, "tests_passed", 0) if functional else 0
+        tests_total = getattr(functional, "tests_total", 0) if functional else 0
+
+        # If empty functional score
+        if not compile_pass and tests_total == 0 and test_pass_rate == 0.0:
+            return EvaluationResult(
+                reward=0.0,
+                functional=functional or FunctionalScore(),
+                synthesis=synthesis or SynthesisScore(),
+                reward_breakdown={"compile": 0.0, "functional": 0.0},
+            )
+
+        # Correctness score [0, 1]
+        correctness = 0.0
+        if compile_pass:
+            correctness += 0.3
+        if lint_pass:
+            correctness += 0.1
+        correctness += 0.6 * test_pass_rate
+
+        breakdown: dict[str, float] = {
+            "compile": 0.3 if compile_pass else 0.0,
+            "lint": 0.1 if lint_pass else 0.0,
+            "tests": 0.6 * test_pass_rate,
+            "correctness": correctness,
+        }
+
+        if self.phase == 1 or synthesis is None or not getattr(synthesis, "synthesizable", False):
+            reward = correctness
+        else:
+            area_sc = getattr(synthesis, "area_score", 0.5)
+            timing_sc = getattr(synthesis, "timing_score", 0.5)
+            power_sc = getattr(synthesis, "power_score", 0.5)
+
+            breakdown["area"] = self.w_area * area_sc
+            breakdown["timing"] = self.w_timing * timing_sc
+            breakdown["power"] = self.w_power * power_sc
+
+            reward = (
+                self.w_correctness * correctness
+                + self.w_area * area_sc
+                + self.w_timing * timing_sc
+                + self.w_power * power_sc
+            )
+
+        reward = max(0.0, min(1.0, reward))
+
+        return EvaluationResult(
+            reward=round(reward, 4),
+            functional=functional or FunctionalScore(),
+            synthesis=synthesis or SynthesisScore(),
+            reward_breakdown=breakdown,
+        )

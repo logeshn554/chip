@@ -41,11 +41,31 @@ class KnowledgeMemory:
         # Initialize ChromaDB
         self._client = chromadb.PersistentClient(path=chroma_path)
 
-        # Use built-in embedding function
-        from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
-        self._embedding_fn = SentenceTransformerEmbeddingFunction(
-            model_name=embedding_model
-        )
+        # Try loading SentenceTransformer, fallback to deterministic vectorizer if offline or auth fails
+        try:
+            from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
+            self._embedding_fn = SentenceTransformerEmbeddingFunction(
+                model_name=embedding_model
+            )
+            # Test call to ensure it didn't fail authentication
+            self._embedding_fn(["test"])
+        except Exception as e:
+            logger.warning(f"SentenceTransformer embedding unavailable ({e}). Using offline deterministic embedding.")
+            class DeterministicEmbeddingFunction:
+                def __init__(self, dim: int = 384):
+                    self.dim = dim
+                def __call__(self, input: list[str]) -> list[list[float]]:
+                    embeddings = []
+                    for text in input:
+                        vec = [0.0] * self.dim
+                        words = text.lower().split()
+                        for i, w in enumerate(words):
+                            h = abs(hash(w)) % self.dim
+                            vec[h] += 1.0 / (1.0 + i * 0.05)
+                        norm = sum(x * x for x in vec) ** 0.5 or 1.0
+                        embeddings.append([x / norm for x in vec])
+                    return embeddings
+            self._embedding_fn = DeterministicEmbeddingFunction()
 
         self._collection = self._client.get_or_create_collection(
             name=self.collection_name,
@@ -82,7 +102,7 @@ class KnowledgeMemory:
         metadatas = []
 
         for i, chunk in enumerate(chunks):
-            chunk_id = self._make_id(chunk)
+            chunk_id = f"{self._make_id(chunk)}_{i}"
             ids.append(chunk_id)
             documents.append(chunk)
             metadatas.append({

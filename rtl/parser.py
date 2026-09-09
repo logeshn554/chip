@@ -111,8 +111,9 @@ class RTLParser:
         port_pattern = re.compile(
             r"(input|output|inout)\s+"              # direction
             r"(?:(wire|reg|logic)\s+)?"             # optional type
-            r"(?:(\[[\d:]+\])\s*)?"                 # optional width
-            r"(\w+)"                                 # port name
+            r"(?:signed\s+)?"                       # optional signed qualifier
+            r"(?:(\[[^\]]+\])\s*)?"                 # optional width (supports parameterized widths like [DATA_WIDTH-1:0])
+            r"(\w+)"                                # port name
         )
 
         # Search in port text first, then full module code
