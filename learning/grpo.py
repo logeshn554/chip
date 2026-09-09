@@ -32,12 +32,15 @@ logger = logging.getLogger(__name__)
 
 
 def compute_group_advantages(rewards: list[float], eps: float = 1e-4) -> list[float]:
-    """Compute Group Relative Policy Optimization (GRPO) advantages.
+    """Compute Group Relative Policy Optimization (GRPO) advantages:
     
     A_i = (R_i - mean(R)) / (std(R) + eps)
     
-    Given a group of completions for a prompt, GRPO normalizes rewards relative to the group
-    to provide policy gradient estimates without requiring a separate critic network.
+    This is the mathematical formula of GRPO advantage normalization.
+    - Used directly in standalone custom policy gradient rollout loops.
+    - When delegating to HuggingFace TRL's GRPOTrainer, TRL handles internal group advantage
+      calculation across generated candidate completions, using HardwareRewardEvaluator as
+      its reward_funcs callback.
     """
     if not rewards:
         return []
@@ -74,6 +77,8 @@ class HardwareRewardEvaluator:
         target_timing_ns: float = 5.0,
         enable_synthesis: bool = True,
         enable_formal: bool = True,
+        formal_properties: Optional[str] = None,
+        benchmark_task_id: Optional[str] = None,
     ):
         self.top_module = top_module
         self.test_file = test_file
@@ -82,6 +87,18 @@ class HardwareRewardEvaluator:
         self.target_timing_ns = target_timing_ns
         self.enable_synthesis = enable_synthesis
         self.enable_formal = enable_formal
+        self.formal_properties = formal_properties
+
+        if benchmark_task_id:
+            try:
+                from benchmarks.curriculum import BenchmarkCurriculum
+                task_obj = BenchmarkCurriculum().get_task(benchmark_task_id)
+                if task_obj:
+                    self.top_module = task_obj.top_module
+                    if task_obj.formal_properties and not self.formal_properties:
+                        self.formal_properties = task_obj.formal_properties
+            except Exception as e:
+                logger.debug(f"Could not load benchmark task {benchmark_task_id}: {e}")
 
         os.makedirs(work_dir, exist_ok=True)
 
@@ -159,10 +176,14 @@ class HardwareRewardEvaluator:
             if synth_res.get("status") == "passed":
                 area = float(synth_res.get("cells", 0) or synth_res.get("estimated_area", 0) or 0)
 
-        # Stage 4: Formal Verification (SymbiYosys)
+        # Stage 4: Formal Verification (SymbiYosys) using external benchmark properties
         formal_status = "SKIPPED"
         if self.enable_formal:
-            formal_res = await self.formal.verify(rtl_path, top_module=self.top_module)
+            formal_res = await self.formal.verify(
+                rtl_path,
+                top_module=self.top_module,
+                external_properties=self.formal_properties,
+            )
             formal_status = formal_res.get("status", "SKIPPED")
 
         # Grounded Reward Calculation with Weight Re-normalization
@@ -219,6 +240,16 @@ class GRPOTrainer:
             test_file=config.get("test_file", "tests/mac/test_mac.py"),
             target_cells=config.get("target_cells", 500.0),
         )
+
+    def compute_step_advantages(self, completions: list[str]) -> tuple[list[float], list[float]]:
+        """Evaluate a group of candidate completions and compute their relative advantages.
+        
+        Returns:
+            (rewards, advantages): tuple of grounded EDA rewards in [0, 1] and normalized advantages.
+        """
+        rewards = self.evaluator.evaluate_batch(completions)
+        advantages = compute_group_advantages(rewards)
+        return rewards, advantages
 
     async def train(self, dataset_path: str) -> dict[str, Any]:
         """Run GRPO training on a hardware preference dataset.

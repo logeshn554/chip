@@ -137,13 +137,34 @@ depth {depth}
         external_prop_file_to_use = external_properties_file
         job_dir = os.path.join(self.work_dir, f"job_{top_module}")
         os.makedirs(job_dir, exist_ok=True)
+        rtl_file_for_sby = file_path
 
         if external_properties:
-            external_prop_file_to_use = os.path.join(job_dir, f"{top_module}_formal_spec.sv")
-            with open(external_prop_file_to_use, "w", encoding="utf-8") as f:
-                f.write(external_properties)
             ext_meta = self.check_embedded_formal_properties(external_properties)
             formal_meta["num_assertions"] += ext_meta["num_assertions"]
+
+            if "module " in external_properties and "endmodule" in external_properties:
+                # Standalone formal checker module
+                external_prop_file_to_use = os.path.join(job_dir, f"{top_module}_formal_spec.sv")
+                with open(external_prop_file_to_use, "w", encoding="utf-8") as f:
+                    f.write(external_properties)
+            else:
+                # Direct SystemVerilog assertions: instrument a verified copy of candidate RTL
+                # safely inserting the benchmark specification assertions before endmodule
+                rtl_file_for_sby = os.path.join(job_dir, f"{top_module}_with_formal.sv")
+                endmod_idx = code.rfind("endmodule")
+                if endmod_idx != -1:
+                    instrumented_code = (
+                        code[:endmod_idx]
+                        + "\n    // ── External Benchmark Formal Specification (Ground Truth) ──\n"
+                        + f"    `ifdef FORMAL\n    {external_properties.strip()}\n    `endif\n"
+                        + code[endmod_idx:]
+                    )
+                else:
+                    instrumented_code = code + f"\n\n`ifdef FORMAL\n{external_properties}\n`endif\n"
+
+                with open(rtl_file_for_sby, "w", encoding="utf-8") as f:
+                    f.write(instrumented_code)
 
         # If sby binary is NOT available, report SKIPPED (never falsely claim PASS)
         if not self._has_binary:
@@ -167,7 +188,7 @@ depth {depth}
         # Sby is available: create job and execute
         sby_config = self.generate_sby_config(
             top_module=top_module,
-            rtl_file=file_path,
+            rtl_file=rtl_file_for_sby,
             depth=depth,
             properties_file=external_prop_file_to_use,
         )

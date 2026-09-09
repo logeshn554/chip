@@ -78,6 +78,18 @@ endmodule
         # Compile failure must trigger hard gate: reward = 0.0
         assert reward == 0.0
 
+    def test_grpo_trainer_step_advantages(self, tmp_path):
+        from learning.grpo import GRPOTrainer
+        trainer = GRPOTrainer({"top_module": "mac", "output_dir": str(tmp_path / "models")})
+        completions = [
+            "```systemverilog\nmodule mac (invalid syntax\n```",
+            "non-code text here",
+        ]
+        rewards, advantages = trainer.compute_step_advantages(completions)
+        assert len(rewards) == 2
+        assert len(advantages) == 2
+        assert all(r == 0.0 for r in rewards)
+
 
 class TestRLTransitionBuilder:
     def test_build_rl_transitions(self, tmp_path):

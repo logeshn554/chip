@@ -11,77 +11,30 @@ A research prototype for an autonomous hardware design and verification agent bu
 ## 1. Target Architecture & Data Flow
 
 ```
-                         ┌──────────────────────────────┐
-                         │          USER TASK           │
-                         │ "Design an 8-bit signed MAC" │
-                         └──────────────┬───────────────┘
-                                        │
-                                        ▼
-                         ┌──────────────────────────────┐
-                         │       HARDWARE AGENT         │
-                         │     (agent/agent_loop.py)    │
-                         └──────┬───────────────┬───────┘
-                                │               │
-                ┌───────────────┘               └───────────────┐
-                ▼                                               ▼
-   ┌──────────────────────────┐                   ┌──────────────────────────┐
-   │         QWEN3-4B         │                   │      4-TIER MEMORY       │
-   │   (llm/qwen, agent/qwen) │                   │         (memory/)        │
-   │  - Ollama / Transformers │                   ├──────────────────────────┤
-   │  - vLLM / Mock Backends  │                   │ 1. Knowledge (ChromaDB)  │
-   │  - Safe JSON extraction  │                   │ 2. Experience (Fix pairs)│
-   └────────────┬─────────────┘                   │ 3. Design (Git versions) │
-                │                                 │ 4. Trajectory (JSONL)    │
-                ▼                                 └─────────────┬────────────┘
-   ┌──────────────────────────┐                                 │
-   │     DECISION & PLAN      │                                 │
-   └────────────┬─────────────┘                                 │
-                ├───────────────────────────────────────────────┤
-                ▼                                               ▼
-   ┌──────────────────────────┐                   ┌──────────────────────────┐
-   │   TARGETED WEB RESEARCH  │                   │     EXISTING MEMORY      │
-   │  - ScrapeGraphAI adapter │                   │  - Relevant SV rules     │
-   │  - Allowed domain filter │                   │  - Past error fixes      │
-   │  - Injection defense     │                   │  - Prior design metrics  │
-   └────────────┬─────────────┘                   └─────────────┬────────────┘
-                └───────────────────────┬───────────────────────┘
-                                        ▼
-                         ┌──────────────────────────────┐
-                         │      15 TYPED ACTIONS        │
-                         │    (agent/action_router.py)  │
-                         └──────────────┬───────────────┘
-                                        │
-                ┌───────────────────────┼───────────────────────┐
-                ▼                       ▼                       ▼
-      ┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐
-      │   GENERATE RTL   │    │ RUN VERIFICATION │    │  SYNTHESIS & EDA │
-      │  SystemVerilog   │    │ Verilator,Cocotb │    │  Yosys & Metrics │
-      │  (IEEE 1800-2012)│    │ SymbiYosys formal│    │  (Cells, Wires)  │
-      └─────────┬────────┘    └────────┬─────────┘    └────────┬─────────┘
-                └───────────────────────┼───────────────────────┘
-                                        ▼
-                         ┌──────────────────────────────┐
-                         │    GROUNDED REWARD ENGINE    │
-                         │      (evaluator/reward.py)   │
-                         │  - Hard gates (compile/lint) │
-                         │  - Normalized weights        │
-                         │  - Truthful formal metrics   │
-                         └──────────────┬───────────────┘
-                                        │
-                ┌───────────────────────┴───────────────────────┐
-                ▼                                               ▼
-   ┌──────────────────────────┐                   ┌──────────────────────────┐
-   │    TRAJECTORY STORE      │                   │      DESIGN MEMORY       │
-   │  (JSONL steps & returns) │                   │ (Git-tagged architecture)│
-   └────────────┬─────────────┘                   └──────────────────────────┘
-                ▼
-   ┌──────────────────────────┐
-   │   DATASET & SFT / RL     │
-   │  - Filter & dedup pairs  │
-   │  - Gym RL environment    │
-   │  - SFT / GRPO preparation│
-   └──────────────────────────┘
+┌────────────────────────────────────────────────────────┐
+│                   External Policy                      │
+│     (Qwen3-4B / PPO / GRPO Policy Generator)           │
+└──────────────────────────┬─────────────────────────────┘
+                           │ selects typed action
+                           ▼
+┌────────────────────────────────────────────────────────┐
+│             Gymnasium HardwareDesignEnv                │
+│    - Sandbox execution & action routing                │
+│    - Calls EDA tools (Verilator, Cocotb, Yosys, SBY)   │
+│    - Evaluates grounded reward & verification state    │
+└──────────────────────────┬─────────────────────────────┘
+                           │ (obs, step_reward, done, info)
+                           ▼
+┌────────────────────────────────────────────────────────┐
+│           Trajectory & Advantage Engine                │
+│    - Trajectory Store (JSONL + SFT transitions)        │
+│    - Group Advantage Normalization (GRPO)              │
+│    - TRL GRPOTrainer / Policy Gradient update          │
+└────────────────────────────────────────────────────────┘
 ```
+
+> **Architectural Boundary**:
+> `HardwareDesignEnv` is deliberately designed as the underlying Gymnasium execution environment. It does not replace or embed the agent policy. Qwen3-4B (or any external RL policy, PPO, or GRPO actor) acts as the decision-making policy driving the environment.
 
 ---
 
@@ -139,18 +92,20 @@ $$R_{\text{modular}} = \sum_{k \in \text{Available}} w_k^{\text{effective}} \cdo
 - **Hard Gate 1 (Compilation)**: If Verilator lint or compilation fails, $R_{\text{quality}} = 0.0$.
 - **Hard Gate 2 (Functionality)**: If mandatory functional tests fail, design reward cannot exceed zero.
 - **Dynamic Weight Re-Normalization**: If area, timing, or power measurements are unavailable, the engine does NOT award artificial full credit (1.0). Instead, weights are dynamically re-normalized strictly over measured objectives.
-- **Base vs. Auxiliary Formal Verification**:
-  - `compute_v1_reward`: 8-point base reward (`compile(1) + functional(5) + synthesis(1) + lint(1)`). Formal verification is explicitly reported as an auxiliary metric (`formal_score`) to avoid altering the base scale.
-  - External formal verification properties are bound outside the generated RTL (`benchmarks/curriculum.py`, `tools/formal.py`) preventing reward hacking through trivial self-generated assertions.
-- **Phase Separation**:
-  - `episode_return += step_reward`
-  - `best_design_reward = max(best_design_reward, current_design_reward)`
+- **Strict Separation of RL Rewards vs Design Quality**:
+  - **Step Reward ($r_t \in [-0.5, +1.0]$)**: Transition reward for individual actions (exploration bonus, compile progress, or error penalty).
+  - **Episode Return ($\sum r_t$)**: Cumulative return across episode steps.
+  - **Objective Design Quality ($Q \in [0.0, 1.0]$)**: Grounded hardware quality calculated strictly by `RewardEngine.compute_modular_reward()` from actual EDA outputs (compile, pass rate, area, formal status). Never equated with action accumulation.
+  - **Auxiliary Engineering Score ($0.0 - 8.0$)**: Provided in `info["engineering_score_v1"]` ($Q \times 8.0$) for human-readable backward compatibility.
+- **Objective Completion Gate**:
+  - The `COMPLETE` action verifies compile pass, functional test pass, formal verification pass (if properties specified), and $Q \ge 0.50$. Premature completion incurs a $-0.5$ penalty.
+- **No Secret Fallback Generators**: The environment requires policies to supply actual SystemVerilog code. Calling `GENERATE_RTL` without code returns an error penalty (`step_reward = -0.5`), preventing experiment contamination.
 
 ---
 
-## 6. 7-Level Benchmark Curriculum (`benchmarks/curriculum.py`)
+## 6. 7-Level Benchmark Curriculum & External Formal Properties
 
-A standardized progressive hardware curriculum with held-out test suites, external formal specifications, and known-good golden references:
+A standardized progressive hardware curriculum with held-out test suites, external formal specifications, and golden references (`benchmarks/curriculum.py`):
 
 - **Level 1 (Basic Logic)**: NOT Gate, AND/OR Gates, 4:1 Multiplexer, 3-to-8 Decoder, 4-bit Binary Counter.
 - **Level 2 (Registers & Arithmetic)**: 8-bit Register with Enable, 8-bit Ripple-Carry Adder, 8-bit Arithmetic Logic Unit (ALU), Synchronous FIFO, 8-bit Shift Register.
@@ -160,24 +115,34 @@ A standardized progressive hardware curriculum with held-out test suites, extern
 - **Level 6 (RISC-V)**: RV32I Instruction Decoder, 32-bit ALU with Branch Comparator.
 - **Level 7 (NPU Components)**: Weight Buffer Unit, ReLU / Activation Engine, Quantized Dot-Product Unit.
 
+> **External Formal Verification Binding**:
+> Benchmark tasks specify independent formal properties (`formal_properties`) separate from candidate RTL. During formal verification (`tools/formal.py`), these properties are instrumented into a verified copy of the design under ``` `ifdef FORMAL ``` in the verification job directory. This ensures model-generated RTL cannot tamper with or bypass benchmark assertions.
+
 ---
 
 ## 7. Learning Foundations: SFT, Hardware-in-the-Loop GRPO, and Gymnasium RL Environment
 
 The repository provides concrete, reproducible learning infrastructure:
-- **Official Gymnasium RL Environment** (`learning/environment.py`): Inherits `gymnasium.Env`, implements standard spaces (`spaces.Discrete`, `spaces.Dict`), `reset(seed, options) -> (obs, info)`, and `step(action) -> (obs, reward, terminated, truncated, info)` with true reward accumulation.
+
+- **Official Gymnasium RL Environment** (`learning/environment.py`):
+  - Inherits `gymnasium.Env` and strictly enforces identical schema contracts across `observation_space`, `reset()`, and `step()`.
+  - **Base Dictionary Space**: Structured text and numeric dict (`task`, `step`, `current_rtl`, `last_error`, `best_reward`, `current_reward`, `status`) matching `spaces.Dict` with printable character sets.
+  - **Vector Wrapper (`HardwareVectorObservationWrapper`)**: Projects observations into a 1D `spaces.Box(shape=(10,), dtype=np.float32)` vector for classical RL algorithms (e.g. Stable-Baselines3 PPO/DQN).
+  - **Policy Wrapper (`QwenHardwareDesignPolicy`)**: Demonstrates how external LLM policies (Qwen3-4B) interact with `HardwareDesignEnv`.
 - **Genuine Hardware-Reward GRPO** (`learning/grpo.py`):
   - `HardwareRewardEvaluator`: Evaluates candidate completions directly with Verilator lint/compile, Cocotb functional simulation, Yosys synthesis, and SymbiYosys formal verification.
-  - Eliminates heuristic completion length proxies in favor of grounded hardware rewards.
-  - `compute_group_advantages`: Implements group-relative advantage normalization: $A_i = (R_i - \mu)/\sigma$.
+  - Eliminates heuristic completion length proxies in favor of grounded hardware rewards in $[0.0, 1.0]$.
+  - `compute_group_advantages`: Implements standalone group-relative advantage normalization: $A_i = (R_i - \mu)/\sigma$.
+  - `GRPOTrainer.compute_step_advantages`: Evaluates completion groups and calculates relative advantages directly.
+  - TRL Integration: Fully compatible with Hugging Face TRL `GRPOTrainer` using `HardwareRewardEvaluator` as its reward callback.
 - **RL Transition Dataset Builder** (`learning/dataset.py`):
-  - Converts raw trajectory logs into standardized $(s_t, a_t, r_t, s_{t+1}, done)$ MDP transitions.
+  - Converts raw trajectory logs into standardized $(s_t, a_t, r_t, s_{t+1}, done)$ MDP transitions (`RLTransition`).
   - Prepares failure/fix pairs for error-recovery SFT.
   - Generates preference pairs (`prompt`, `chosen`, `rejected`) for DPO/GRPO.
 - **Honest Status on Self-Evolution**:
   - **In-Episode Adaptation (Phase A)**: Implemented & verified (agent diagnoses compiler/simulation errors and repairs RTL).
   - **Memory-Based Improvement (Phase B)**: Implemented & verified (retrieves past fixes from ChromaDB).
-  - **Model Weight Evolution (Phase C/D)**: Foundation, Gymnasium environment, Hardware-Reward GRPO evaluator, and transition datasets are fully implemented and verified. Actual model weight updating requires running offline SFT/GRPO on collected trajectories.
+  - **Model Weight Evolution (Phase C/D)**: Foundation, Gymnasium environment, Hardware-Reward GRPO evaluator, advantage computation, and transition datasets are fully implemented and verified. Actual model weight updating requires running offline SFT/GRPO on collected trajectories with GPU compute.
 
 ---
 
@@ -202,7 +167,7 @@ python main.py status
 ```bash
 python -m pytest tests/ -v
 ```
-*(Runs 91 test cases covering JSON parsing, error recovery, security path restriction, formal verification, Scraping filters, reward math, and the RL environment).*
+*(Runs 104 test cases covering JSON parsing, error recovery, security path restriction, formal verification, Scraping filters, reward math, vector wrappers, and the RL environment).*
 
 ### Step 4: Run End-to-End Milestone (8-Bit Signed MAC)
 ```bash

@@ -64,3 +64,18 @@ class TestFormalVerificationTool:
         # Properties checked must account for the external specification
         assert res["properties_checked"] >= 1
         assert os.path.exists(tmp_path / "job_mac" / "mac_formal_spec.sv")
+
+    @pytest.mark.asyncio
+    async def test_external_direct_assertion_instrumentation(self, tmp_path):
+        tool = FormalVerificationTool(sby_binary="non_existent_sby_binary_12345", work_dir=str(tmp_path))
+        test_file = tmp_path / "mac.sv"
+        test_file.write_text("module mac (input logic clk, output logic [31:0] accum); endmodule\n")
+
+        external_spec = "always @(posedge clk) assert property (accum == '0);"
+        res = await tool.verify(str(test_file), top_module="mac", external_properties=external_spec)
+        assert res["properties_checked"] >= 1
+        instrumented_file = tmp_path / "job_mac" / "mac_with_formal.sv"
+        assert os.path.exists(instrumented_file)
+        content = instrumented_file.read_text()
+        assert "accum == '0" in content
+        assert "`ifdef FORMAL" in content
