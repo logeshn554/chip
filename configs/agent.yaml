@@ -14,7 +14,7 @@ llm:
   top_p: 0.95
   top_k: 20
   enable_thinking: true
-  timeout_seconds: 300.0
+  timeout_seconds: 600.0
 
   ollama:
     base_url: "http://localhost:11434"

@@ -80,6 +80,12 @@ build-backend = "setuptools.build_meta"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+filterwarnings = [
+    "ignore::pydantic.warnings.PydanticDeprecatedSince20",
+    "ignore:.*langchain-community.*:DeprecationWarning",
+    "ignore:.*DeterministicEmbeddingFunction.*is_legacy.*:DeprecationWarning",
+    "ignore:.*coroutine 'ChromiumLoader.ascrape_playwright' was never awaited.*:RuntimeWarning",
+]
 
 [tool.ruff]
 line-length = 100

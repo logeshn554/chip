@@ -56,6 +56,8 @@ class KnowledgeMemory:
                     self.dim = dim
                 def name(self) -> str:
                     return "default"
+                def is_legacy(self) -> bool:
+                    return True
                 def embed_query(self, input: Any) -> list[list[float]] | list[float]:
                     if isinstance(input, str):
                         return self([input])[0]

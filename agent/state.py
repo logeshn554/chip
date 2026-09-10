@@ -90,7 +90,7 @@ class AgentState:
 
         # 4. RELEVANT WEB EXTRACTS (Sanitized compact context only)
         if self.relevant_web_extracts:
-            sections.append(f"## RELEVANT TECHNICAL RESEARCH\n" + "\n\n".join(self.relevant_web_extracts[-2:]))
+            sections.append(f"## RELEVANT TECHNICAL RESEARCH\n" + "\n\n".join(e[:800] for e in self.relevant_web_extracts[-2:]))
 
         # 5. CURRENT RTL
         if self.current_rtl:

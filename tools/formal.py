@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import shutil
+import sys
 import tempfile
 from typing import Any, Optional
 
@@ -26,11 +27,32 @@ class FormalVerificationTool:
     """Wrapper for SymbiYosys formal verification."""
 
     def __init__(self, sby_binary: str = "sby", work_dir: str = "./sim_build/formal"):
-        self.sby_binary = sby_binary
+        self.sby_binary = self._resolve_binary(sby_binary)
         self.work_dir = work_dir
         os.makedirs(work_dir, exist_ok=True)
-        self._has_binary = shutil.which(sby_binary) is not None
+        self._has_binary = (shutil.which(self.sby_binary) is not None) or os.path.exists(self.sby_binary)
         self.tool_version = self._detect_version()
+
+    @staticmethod
+    def _resolve_binary(name: str) -> str:
+        """Resolve native or YoWASP SymbiYosys binary across PATH and virtual environment."""
+        if os.path.isabs(name) and os.path.exists(name):
+            return name
+        scripts_dir = os.path.join(sys.prefix, "Scripts")
+        for cand in [
+            os.path.join(scripts_dir, f"{name}.exe"),
+            os.path.join(scripts_dir, f"yowasp-{name}.exe"),
+            os.path.join(scripts_dir, f"{name}.cmd"),
+        ]:
+            if os.path.exists(cand):
+                return cand
+        found = shutil.which(name)
+        if found:
+            return found
+        yowasp_found = shutil.which(f"yowasp-{name}")
+        if yowasp_found:
+            return yowasp_found
+        return name
 
     def _detect_version(self) -> str:
         """Detect SymbiYosys binary version."""
@@ -38,7 +60,11 @@ class FormalVerificationTool:
             return "sby (not installed)"
         try:
             import subprocess
-            out = subprocess.check_output([self.sby_binary, "--version"], text=True, stderr=subprocess.STDOUT)
+            sub_env = os.environ.copy()
+            scripts_dir = os.path.join(sys.prefix, "Scripts")
+            if os.path.exists(scripts_dir) and scripts_dir not in sub_env.get("PATH", ""):
+                sub_env["PATH"] = scripts_dir + os.pathsep + sub_env.get("PATH", "")
+            out = subprocess.check_output([self.sby_binary, "--version"], text=True, stderr=subprocess.STDOUT, env=sub_env)
             return out.strip().splitlines()[0]
         except Exception:
             return "sby (version unknown)"
@@ -53,13 +79,13 @@ class FormalVerificationTool:
         top_module: str,
         rtl_file: str,
         depth: int = 20,
-        engine: str = "smtbmc",
+        engine: str = "smtbmc boolector",
         properties_file: Optional[str] = None,
     ) -> str:
         """Generate a standard SymbiYosys .sby configuration with optional external properties."""
         abs_rtl = os.path.abspath(rtl_file).replace("\\", "/")
         
-        script_lines = [f"read -formal {os.path.basename(abs_rtl)}"]
+        script_lines = [f"read_verilog -sv -formal {os.path.basename(abs_rtl)}"]
         files_lines = [abs_rtl]
 
         if properties_file and os.path.exists(properties_file):
@@ -89,9 +115,9 @@ depth {depth}
 
     def check_embedded_formal_properties(self, code: str) -> dict[str, Any]:
         """Static inspection of SystemVerilog formal assertions and assumptions."""
-        assert_matches = re.findall(r"\bassert\s+property\s*\((.*?)\);", code, re.DOTALL)
-        assume_matches = re.findall(r"\bassume\s+property\s*\((.*?)\);", code, re.DOTALL)
-        cover_matches = re.findall(r"\bcover\s+property\s*\((.*?)\);", code, re.DOTALL)
+        assert_matches = re.findall(r"\bassert(?:\s+property)?\s*\((.*?)\);", code, re.DOTALL)
+        assume_matches = re.findall(r"\bassume(?:\s+property)?\s*\((.*?)\);", code, re.DOTALL)
+        cover_matches = re.findall(r"\bcover(?:\s+property)?\s*\((.*?)\);", code, re.DOTALL)
 
         return {
             "num_assertions": len(assert_matches),
@@ -218,12 +244,17 @@ depth {depth}
             f.write(sby_config)
 
         try:
+            sub_env = os.environ.copy()
+            scripts_dir = os.path.join(sys.prefix, "Scripts")
+            if os.path.exists(scripts_dir) and scripts_dir not in sub_env.get("PATH", ""):
+                sub_env["PATH"] = scripts_dir + os.pathsep + sub_env.get("PATH", "")
             cmd = [self.sby_binary, "-f", f"{top_module}.sby"]
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=job_dir,
+                env=sub_env,
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             output = (stdout + stderr).decode("utf-8", errors="replace")

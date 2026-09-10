@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import shutil
+import sys
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -44,17 +45,38 @@ class VerilatorTool:
         if isinstance(binary, dict):
             work_dir = binary.get("work_dir", work_dir)
             binary = binary.get("binary", "verilator")
-        self.binary = str(binary)
+        self.binary = self._resolve_binary(str(binary))
         self.work_dir = work_dir
         os.makedirs(work_dir, exist_ok=True)
-        self._has_binary = shutil.which(self.binary) is not None
+        self._has_binary = (shutil.which(self.binary) is not None) or os.path.exists(self.binary)
         self.tool_version = self._detect_version() if self._has_binary else "heuristic_fallback"
+
+    @staticmethod
+    def _resolve_binary(name: str) -> str:
+        """Resolve native Verilator binary across PATH and virtual environment."""
+        if os.path.isabs(name) and os.path.exists(name):
+            return name
+        scripts_dir = os.path.join(sys.prefix, "Scripts")
+        for cand in [
+            os.path.join(scripts_dir, f"{name}.exe"),
+            os.path.join(scripts_dir, f"{name}.cmd"),
+        ]:
+            if os.path.exists(cand):
+                return cand
+        found = shutil.which(name)
+        if found:
+            return found
+        return name
 
     def _detect_version(self) -> str:
         """Query native Verilator binary version."""
         try:
             import subprocess
-            out = subprocess.check_output([self.binary, "--version"], text=True, stderr=subprocess.STDOUT)
+            sub_env = os.environ.copy()
+            scripts_dir = os.path.join(sys.prefix, "Scripts")
+            if os.path.exists(scripts_dir) and scripts_dir not in sub_env.get("PATH", ""):
+                sub_env["PATH"] = scripts_dir + os.pathsep + sub_env.get("PATH", "")
+            out = subprocess.check_output([self.binary, "--version"], text=True, stderr=subprocess.STDOUT, env=sub_env)
             return out.strip().splitlines()[0]
         except Exception:
             return "verilator (version unknown)"

@@ -131,7 +131,7 @@ async def main():
     llm = OllamaQwenClient(
         model=model_name,
         base_url=base_url,
-        timeout=llm_cfg.get("timeout_seconds", 60.0),
+        timeout=llm_cfg.get("timeout_seconds", 600.0),
         temperature=llm_cfg.get("temperature", 0.2),
         top_p=llm_cfg.get("top_p", 0.9),
     )

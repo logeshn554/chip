@@ -29,14 +29,15 @@ class OllamaQwenClient(LLMInterface):
         self,
         model: Optional[str] = None,
         base_url: str = "http://localhost:11434",
-        timeout: float = 180.0,
+        timeout: Optional[float] = None,
         temperature: float = 0.2,
         top_p: float = 0.9,
         mock_mode: bool = False,
     ):
         self.model = get_default_model(model)
         self.base_url = base_url.rstrip("/")
-        self.timeout = timeout
+        default_timeout = float(os.environ.get("LLM_TIMEOUT", "600.0"))
+        self.timeout = timeout if timeout is not None else default_timeout
         self.temperature = temperature
         self.top_p = top_p
         self.mock_mode = mock_mode
@@ -186,9 +187,19 @@ class OllamaQwenClient(LLMInterface):
             raise RuntimeError(
                 f"Ollama request failed: HTTP {e.code}. URL={url}, model={self.model}"
             ) from e
-        except (urllib.error.URLError, TimeoutError) as e:
+        except TimeoutError as e:
             raise RuntimeError(
-                f"Cannot connect to Ollama at {self.base_url}. Ensure Ollama is running."
+                f"Ollama generation timed out after {self.timeout}s (URL={url}, model={self.model}). "
+                f"Consider increasing timeout_seconds or reducing prompt length."
+            ) from e
+        except urllib.error.URLError as e:
+            if isinstance(e.reason, TimeoutError) or "timed out" in str(e.reason).lower():
+                raise RuntimeError(
+                    f"Ollama generation timed out after {self.timeout}s (URL={url}, model={self.model}). "
+                    f"Consider increasing timeout_seconds or reducing prompt length."
+                ) from e
+            raise RuntimeError(
+                f"Cannot connect to Ollama at {self.base_url}. Ensure Ollama is running (`ollama serve`). Error: {e}"
             ) from e
 
         output_text = data.get("response")

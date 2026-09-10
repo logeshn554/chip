@@ -232,8 +232,19 @@ def status(ctx):
 
     # Check tools
     import shutil
+    from tools.yosys import YosysTool
+    from tools.formal import FormalVerificationTool
+    from tools.verilator import VerilatorTool
+
+    tool_resolvers = {
+        "verilator": VerilatorTool._resolve_binary,
+        "yosys": YosysTool._resolve_binary,
+        "sby": FormalVerificationTool._resolve_binary,
+    }
     for tool in ["verilator", "yosys", "sby", "make", "git"]:
-        found = shutil.which(tool)
+        resolver = tool_resolvers.get(tool)
+        resolved = resolver(tool) if resolver else None
+        found = resolved if (resolved and os.path.exists(resolved)) else shutil.which(tool)
         icon = "[OK]" if found else "[--]"
         color = "green" if found else "yellow"
         console.print(f"  [{color}]{icon}[/] {tool}: {found or 'not found'}")

@@ -17,6 +17,9 @@ class DeterministicEmbeddingFunction:
     def name(self) -> str:
         return "deterministic_embedding_v1"
 
+    def is_legacy(self) -> bool:
+        return True
+
     def embed_query(self, input: Any) -> list[list[float]]:
         return self(input)
 

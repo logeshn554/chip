@@ -190,7 +190,7 @@ endmodule
 """,
             public_tests=[{"cycles": 5, "en": 1, "expected": 5}],
             held_out_tests=[{"cycles": 16, "en": 1, "expected": 0}],
-            formal_properties="always @(posedge clk) if (!rst_n) assert property (count == 4'd0); else if (en && $past(rst_n)) assert property (count == ($past(count) + 4'd1));",
+            formal_properties="initial assume (!rst_n); always @(posedge clk) begin if (!rst_n) begin end else if ($past(!rst_n)) assert property (count == 4'd0); else if (en && $past(rst_n)) assert property (count == ($past(count) + 4'd1)); end",
         ))
 
         # ─────────────────────────────────────────────────────────────
@@ -334,7 +334,7 @@ endmodule
                 {"a": -128, "b": -128, "acc_in": 0, "expected": 16384},
                 {"a": -128, "b": 127, "acc_in": 0, "expected": -16256},
             ],
-            formal_properties="always @(posedge clk) if (!rst_n) assert property (accum == '0); else if ($past(rst_n) && $past(valid_in)) assert property (accum == $past(accum) + ($past(a) * $past(b)));",
+            formal_properties="initial assume (!rst_n); always @(posedge clk) begin if (!rst_n) begin end else if ($past(!rst_n)) assert property (accum == '0); else if ($past(valid_in)) assert property (accum == $past(accum) + ($past(a) * $past(b))); end",
         ))
 
         # ─────────────────────────────────────────────────────────────

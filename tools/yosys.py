@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import shutil
+import sys
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -47,17 +48,42 @@ class YosysTool:
         if isinstance(binary, dict):
             work_dir = binary.get("work_dir", work_dir)
             binary = binary.get("binary", "yosys")
-        self.binary = str(binary)
+        self.binary = self._resolve_binary(str(binary))
         self.work_dir = work_dir
         os.makedirs(work_dir, exist_ok=True)
-        self._has_binary = shutil.which(self.binary) is not None
+        self._has_binary = (shutil.which(self.binary) is not None) or os.path.exists(self.binary)
         self.tool_version = self._detect_version() if self._has_binary else "heuristic_fallback"
+
+    @staticmethod
+    def _resolve_binary(name: str) -> str:
+        """Resolve native or YoWASP Yosys binary across PATH and virtual environment."""
+        if os.path.isabs(name) and os.path.exists(name):
+            return name
+        scripts_dir = os.path.join(sys.prefix, "Scripts")
+        for cand in [
+            os.path.join(scripts_dir, f"{name}.exe"),
+            os.path.join(scripts_dir, f"yowasp-{name}.exe"),
+            os.path.join(scripts_dir, f"{name}.cmd"),
+        ]:
+            if os.path.exists(cand):
+                return cand
+        found = shutil.which(name)
+        if found:
+            return found
+        yowasp_found = shutil.which(f"yowasp-{name}")
+        if yowasp_found:
+            return yowasp_found
+        return name
 
     def _detect_version(self) -> str:
         """Query native Yosys binary version."""
         try:
             import subprocess
-            out = subprocess.check_output([self.binary, "-V"], text=True, stderr=subprocess.STDOUT)
+            sub_env = os.environ.copy()
+            scripts_dir = os.path.join(sys.prefix, "Scripts")
+            if os.path.exists(scripts_dir) and scripts_dir not in sub_env.get("PATH", ""):
+                sub_env["PATH"] = scripts_dir + os.pathsep + sub_env.get("PATH", "")
+            out = subprocess.check_output([self.binary, "-V"], text=True, stderr=subprocess.STDOUT, env=sub_env)
             return out.strip().splitlines()[0]
         except Exception:
             return "Yosys (version unknown)"
@@ -205,11 +231,16 @@ class YosysTool:
                     f"ltp\n"
                 )
             try:
+                sub_env = os.environ.copy()
+                scripts_dir = os.path.join(sys.prefix, "Scripts")
+                if os.path.exists(scripts_dir) and scripts_dir not in sub_env.get("PATH", ""):
+                    sub_env["PATH"] = scripts_dir + os.pathsep + sub_env.get("PATH", "")
                 proc = await asyncio.create_subprocess_exec(
                     self.binary, "-s", f"synth_{top_module}.ys",
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=self.work_dir,
+                    env=sub_env,
                 )
                 stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120.0)
                 output = (stdout + stderr).decode("utf-8", errors="replace")
