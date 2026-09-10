@@ -300,6 +300,19 @@ class ComponentSearchEngine:
                 self.save_component(comp)
                 discovered.append(comp)
 
+        # If web search returned no results, consult the local catalog of previously discovered components
+        if not discovered and self.catalog:
+            matching_catalog: list[ComponentEvidence] = []
+            for comp in self.catalog.values():
+                if category_hint and category_hint != "general" and comp.category == category_hint:
+                    matching_catalog.append(comp)
+                elif any(word in (comp.raw_evidence or "").lower() or word in comp.part_number.lower() for word in query.lower().split() if len(word) > 2):
+                    matching_catalog.append(comp)
+
+            if matching_catalog:
+                matching_catalog.sort(key=lambda c: c.confidence, reverse=True)
+                discovered.extend(matching_catalog[:4])
+
         return discovered
 
     def search_and_extract(
