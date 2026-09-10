@@ -57,7 +57,7 @@ async def test_hardware_agent_actions(tmp_path):
     # 4. RUN_YOSYS
     res_synth = await agent._execute_action("RUN_YOSYS", {"file_path": "mac.sv"}, state)
     assert res_synth["stage"] == "yosys"
-    cells = res_synth.get("cells", res_synth.get("heuristic_cell_guess", 0))
+    cells = res_synth.get("cell_count") or res_synth.get("cells") or res_synth.get("heuristic_cell_guess") or 0
     assert cells > 0
 
     # 5. RETRIEVE_MEMORY

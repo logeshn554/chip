@@ -24,6 +24,7 @@ from typing import Any, Optional
 
 import chromadb
 from chromadb.config import Settings
+from memory.embedding import DeterministicEmbeddingFunction
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +156,7 @@ class ExperienceStore:
         # Pre-flight: check the SQLite sysdb for corruption before creating the client.
         # If corrupt, wipe the dir so the client starts from a clean state.
         _chroma_probe_and_wipe_if_corrupt(persist_dir)
+        self.embedding_fn = DeterministicEmbeddingFunction()
         self.client = chromadb.PersistentClient(
             path=persist_dir,
             settings=Settings(anonymized_telemetry=False),
@@ -171,6 +173,7 @@ class ExperienceStore:
         try:
             coll = self.client.get_or_create_collection(
                 name="hardware_experience",
+                embedding_function=self.embedding_fn,
                 metadata={"description": "Records of past hardware errors, fixes, and rewards"},
             )
             # Probe for schema corruption
@@ -200,6 +203,7 @@ class ExperienceStore:
             )
             coll = self.client.get_or_create_collection(
                 name="hardware_experience",
+                embedding_function=self.embedding_fn,
                 metadata={"description": "Records of past hardware errors, fixes, and rewards"},
             )
             try:

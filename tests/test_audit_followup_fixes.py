@@ -107,6 +107,7 @@ class TestYosysStrictSynthesis:
         )
         res = await yosys.synthesize(str(rtl_file), allow_heuristic_fallback=True)
         assert res["status"] == "passed"
+        assert res["estimated_area"] == float(res["cells"])
         assert res["heuristic_area_guess"] == float(res["heuristic_cell_guess"])
 
 

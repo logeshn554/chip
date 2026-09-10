@@ -24,14 +24,30 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 
+class ToolDict(dict):
+    """Dictionary supporting attribute access and standardized property aliases."""
+    def __getattr__(self, name: str) -> Any:
+        if name == "success":
+            return self.get("status") == "passed"
+        if name == "errors":
+            err = self.get("error", "")
+            return [err] if err else []
+        if name in self:
+            return self[name]
+        raise AttributeError(f"'ToolDict' object has no attribute '{name}'")
+
+
 class VerilatorTool:
     """Wrapper for Verilator EDA tool with structured error reporting."""
 
-    def __init__(self, binary: str = "verilator", work_dir: str = "./sim_build"):
-        self.binary = binary
+    def __init__(self, binary: Any = "verilator", work_dir: str = "./sim_build"):
+        if isinstance(binary, dict):
+            work_dir = binary.get("work_dir", work_dir)
+            binary = binary.get("binary", "verilator")
+        self.binary = str(binary)
         self.work_dir = work_dir
         os.makedirs(work_dir, exist_ok=True)
-        self._has_binary = shutil.which(binary) is not None
+        self._has_binary = shutil.which(self.binary) is not None
         self.tool_version = self._detect_version() if self._has_binary else "heuristic_fallback"
 
     def _detect_version(self) -> str:
@@ -139,25 +155,27 @@ class VerilatorTool:
             "line": None,
         }
 
-    async def lint(self, file_path: str) -> dict[str, Any]:
+    async def lint(self, file_path: Any) -> ToolDict:
         """Run Verilator lint or fallback syntax validation."""
-        filename = os.path.basename(file_path)
+        if isinstance(file_path, (list, tuple)):
+            file_path = file_path[0] if file_path else ""
+        filename = os.path.basename(str(file_path))
 
-        if not os.path.exists(file_path):
-            return {
+        if not file_path or not os.path.exists(str(file_path)):
+            return ToolDict({
                 "stage": "verilator",
                 "status": "failed",
                 "error": f"File not found: {file_path}",
                 "file": filename,
                 "line": 1,
-            }
+            })
 
-        with open(file_path, "r", encoding="utf-8") as f:
+        with open(str(file_path), "r", encoding="utf-8") as f:
             code = f.read()
 
         # Check native binary
         if self._has_binary:
-            cmd = [self.binary, "--lint-only", "-Wall", file_path]
+            cmd = [self.binary, "--lint-only", "-Wall", str(file_path)]
             try:
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
@@ -170,7 +188,7 @@ class VerilatorTool:
                     lines = [l for l in output.splitlines() if "%Error" in l or "%Warning" in l]
                     first_err = lines[0] if lines else output.strip()
                     file_name, line_num = self._parse_error_location(first_err)
-                    return {
+                    return ToolDict({
                         "stage": "verilator",
                         "status": "failed",
                         "tool": "native_verilator",
@@ -179,8 +197,8 @@ class VerilatorTool:
                         "error": first_err,
                         "file": file_name,
                         "line": line_num,
-                    }
-                return {
+                    })
+                return ToolDict({
                     "stage": "verilator",
                     "status": "passed",
                     "tool": "native_verilator",
@@ -189,7 +207,7 @@ class VerilatorTool:
                     "error": "",
                     "file": filename,
                     "line": None,
-                }
+                })
             except Exception as e:
                 logger.warning(f"Native verilator failed to execute: {e}. Falling back to internal linter.")
 
@@ -198,7 +216,7 @@ class VerilatorTool:
         res["tool"] = "internal_regex_linter"
         res["metric_type"] = "heuristic"
         res["tool_version"] = "internal_fallback"
-        return res
+        return ToolDict(res)
 
     async def lint_and_compile(self, file_path: str, top_module: Optional[str] = None) -> dict[str, Any]:
         """Lint and compile SystemVerilog module."""

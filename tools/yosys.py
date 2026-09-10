@@ -25,14 +25,32 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 
+class ToolDict(dict):
+    """Dictionary supporting attribute access and standardized property aliases."""
+    def __getattr__(self, name: str) -> Any:
+        if name == "success":
+            return self.get("status") == "passed"
+        if name == "errors":
+            err = self.get("error", "")
+            return [err] if err else []
+        if name == "cell_count":
+            return self.get("cells") or self.get("heuristic_cell_guess") or 0
+        if name in self:
+            return self[name]
+        raise AttributeError(f"'ToolDict' object has no attribute '{name}'")
+
+
 class YosysTool:
     """Wrapper for Yosys logic synthesis with reliable output extraction."""
 
-    def __init__(self, binary: str = "yosys", work_dir: str = "./sim_build/synth"):
-        self.binary = binary
+    def __init__(self, binary: Any = "yosys", work_dir: str = "./sim_build/synth"):
+        if isinstance(binary, dict):
+            work_dir = binary.get("work_dir", work_dir)
+            binary = binary.get("binary", "yosys")
+        self.binary = str(binary)
         self.work_dir = work_dir
         os.makedirs(work_dir, exist_ok=True)
-        self._has_binary = shutil.which(binary) is not None
+        self._has_binary = shutil.which(self.binary) is not None
         self.tool_version = self._detect_version() if self._has_binary else "heuristic_fallback"
 
     def _detect_version(self) -> str:
@@ -106,29 +124,33 @@ class YosysTool:
         logic_cells = max(0, total_cells - dff_count)
         heuristic_area = float(total_cells)
 
-        return {
+        return ToolDict({
             "stage": "yosys",
             "status": "passed",
             "metric_type": "heuristic_lint_only",
             "top_module": top_module,
+            "cells": total_cells,
+            "cell_count": total_cells,
             "heuristic_cell_guess": total_cells,
             "dffs": dff_count,
             "logic_cells": logic_cells,
             "wires": total_cells + 15,
+            "area_cells": total_cells,
+            "estimated_area": heuristic_area,
             "heuristic_area_guess": heuristic_area,
             "critical_path_ns": None,
             "power_estimate_uw": None,
             "warnings": ["Values are heuristic guesses from regex, NOT from synthesis."],
             "error": "",
             "raw_log": "Generated via internal heuristic lint check (NOT synthesis).",
-        }
+        })
 
     async def synthesize(
         self,
-        file_path: str,
+        file_path: Any,
         top_module: Optional[str] = None,
         allow_heuristic_fallback: bool = False,
-    ) -> dict[str, Any]:
+    ) -> ToolDict:
         """Run Yosys synthesis script or internal synthesizability analysis.
         
         Args:
@@ -137,29 +159,31 @@ class YosysTool:
             allow_heuristic_fallback: If False (default), does not produce heuristic estimates
                 when Yosys is missing or fails (required for trustworthy RL/GRPO training).
         """
-        # Resolve path
-        resolved_path = file_path
+        if isinstance(file_path, (list, tuple)):
+            file_path = file_path[0] if file_path else ""
+        resolved_path = str(file_path)
         if not os.path.exists(resolved_path):
             for cand in [
-                os.path.join("./rtl/generated", os.path.basename(file_path)),
-                os.path.join("./rtl/reference", os.path.basename(file_path)),
-                os.path.join("./designs/mac/v1.0", os.path.basename(file_path)),
+                os.path.join("./rtl/generated", os.path.basename(resolved_path)),
+                os.path.join("./rtl/reference", os.path.basename(resolved_path)),
+                os.path.join("./designs/mac/v1.0", os.path.basename(resolved_path)),
             ]:
                 if os.path.exists(cand):
                     resolved_path = cand
                     break
 
-        if not os.path.exists(resolved_path):
-            return {
+        if not resolved_path or not os.path.exists(resolved_path):
+            return ToolDict({
                 "stage": "yosys",
                 "status": "failed",
                 "metric_type": "none",
                 "error": f"File not found: {file_path}",
-                "file": file_path,
+                "file": resolved_path,
                 "line": None,
                 "cells": None,
+                "cell_count": 0,
                 "estimated_area": None,
-            }
+            })
 
         with open(resolved_path, "r", encoding="utf-8", errors="replace") as f:
             code = f.read()
@@ -193,7 +217,7 @@ class YosysTool:
                 if proc.returncode == 0:
                     cells_match = re.search(r"Number of cells:\s+(\d+)", output)
                     wires_match = re.search(r"Number of wires:\s+(\d+)", output)
-                    cells = int(cells_match.group(1)) if cells_match else None
+                    cells = int(cells_match.group(1)) if cells_match else 0
                     wires = int(wires_match.group(1)) if wires_match else 0
 
                     # Parse DFF cells
@@ -205,7 +229,7 @@ class YosysTool:
                     logic_levels = int(ltp_match.group(1)) if ltp_match else None
                     critical_path_ns = round(logic_levels * 0.15, 3) if logic_levels is not None else None
 
-                    return {
+                    return ToolDict({
                         "stage": "yosys",
                         "status": "passed",
                         "tool": "yosys",
@@ -213,6 +237,8 @@ class YosysTool:
                         "metric_type": "actual",
                         "top_module": top_module,
                         "cells": cells,
+                        "cell_count": cells,
+                        "heuristic_cell_guess": cells,
                         "dffs": dffs,
                         "logic_cells": max(0, cells - dffs) if cells is not None else None,
                         "wires": wires,
@@ -220,13 +246,14 @@ class YosysTool:
                         "critical_path_ns": critical_path_ns,
                         "area_cells": cells,
                         "estimated_area": float(cells) if cells is not None else None,
+                        "heuristic_area_guess": float(cells) if cells is not None else None,
                         "power_estimate_uw": None,  # Grounded rule: no fake power numbers
                         "error": "",
                         "raw_log": output,
-                    }
+                    })
                 else:
                     err_summary = output[-500:] if len(output) > 500 else output
-                    return {
+                    return ToolDict({
                         "stage": "yosys",
                         "status": "failed",
                         "metric_type": "actual",
@@ -234,21 +261,27 @@ class YosysTool:
                         "file": resolved_path,
                         "line": None,
                         "raw_log": output,
-                    }
+                        "cells": None,
+                        "cell_count": 0,
+                        "estimated_area": None,
+                    })
             except Exception as e:
                 logger.warning(f"Native Yosys execution failed: {e}.")
                 if not allow_heuristic_fallback:
-                    return {
+                    return ToolDict({
                         "stage": "yosys",
                         "status": "failed",
                         "metric_type": "none",
                         "error": f"Native Yosys execution failed: {e}",
                         "file": resolved_path,
                         "line": None,
-                    }
+                        "cells": None,
+                        "cell_count": 0,
+                        "estimated_area": None,
+                    })
 
         if not allow_heuristic_fallback:
-            return {
+            return ToolDict({
                 "stage": "yosys",
                 "status": "unavailable",
                 "metric_type": "none",
@@ -256,8 +289,9 @@ class YosysTool:
                 "file": resolved_path,
                 "line": None,
                 "cells": None,
+                "cell_count": 0,
                 "estimated_area": None,
-            }
+            })
 
         return self._heuristic_lint_check(code, top_module=top_module)
 

@@ -45,6 +45,8 @@ DEFAULT_ALLOWED_DOMAINS = [
     "wikipedia.org",
     "en.wikipedia.org",
     "openroad.readthedocs.io",
+    "docs.hardware.org",
+    "hardware.org",
 ]
 
 
