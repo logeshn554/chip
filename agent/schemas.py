@@ -8,11 +8,15 @@ and tool layers are defined here for consistency.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import logging
+import os
 import time
 from typing import Any, Optional
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
+
+logger = logging.getLogger(__name__)
 
 
 # ── Actions ──────────────────────────────────────────────────────────

@@ -534,12 +534,25 @@ class GRPOTrainer:
 
     def _run_training(self, dataset_path: str) -> dict[str, Any]:
         """Execute GRPO training with real hardware reward evaluation and modern TRL API."""
+        import importlib
         import inspect
-        import torch
-        from datasets import load_dataset
-        from peft import LoraConfig, TaskType
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-        from trl import GRPOConfig, GRPOTrainer as TRLGRPOTrainer
+
+        try:
+            torch = importlib.import_module("torch")
+            datasets = importlib.import_module("datasets")
+            peft = importlib.import_module("peft")
+            transformers = importlib.import_module("transformers")
+            trl = importlib.import_module("trl")
+        except ImportError as err:
+            raise ImportError(f"Missing training dependencies: {err}") from err
+
+        load_dataset = datasets.load_dataset
+        LoraConfig = peft.LoraConfig
+        TaskType = peft.TaskType
+        AutoModelForCausalLM = transformers.AutoModelForCausalLM
+        AutoTokenizer = transformers.AutoTokenizer
+        GRPOConfig = trl.GRPOConfig
+        TRLGRPOTrainer = trl.GRPOTrainer
 
         tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         
@@ -547,7 +560,7 @@ class GRPOTrainer:
         model_kwargs: dict[str, Any] = {"device_map": "auto"}
         if self.config.get("load_in_4bit"):
             try:
-                from transformers import BitsAndBytesConfig
+                BitsAndBytesConfig = getattr(transformers, "BitsAndBytesConfig")
                 model_kwargs["quantization_config"] = BitsAndBytesConfig(
                     load_in_4bit=True,
                     bnb_4bit_compute_dtype=torch.bfloat16,

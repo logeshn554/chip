@@ -74,11 +74,25 @@ class SFTTrainer:
 
         Requires: trl, peft, datasets, bitsandbytes
         """
-        import torch
-        from datasets import load_dataset
-        from peft import LoraConfig, TaskType, get_peft_model
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-        from trl import SFTTrainer as TRLSFTTrainer, SFTConfig
+        import importlib
+
+        try:
+            torch = importlib.import_module("torch")
+            datasets = importlib.import_module("datasets")
+            peft = importlib.import_module("peft")
+            transformers = importlib.import_module("transformers")
+            trl = importlib.import_module("trl")
+        except ImportError as err:
+            raise ImportError(f"Missing training dependencies: {err}") from err
+
+        load_dataset = datasets.load_dataset
+        LoraConfig = peft.LoraConfig
+        TaskType = peft.TaskType
+        get_peft_model = peft.get_peft_model
+        AutoModelForCausalLM = transformers.AutoModelForCausalLM
+        AutoTokenizer = transformers.AutoTokenizer
+        SFTTrainer = getattr(trl, "SFTTrainer")
+        SFTConfig = getattr(trl, "SFTConfig")
 
         has_cuda = torch.cuda.is_available()
         has_hip = getattr(torch.version, "hip", None) is not None
