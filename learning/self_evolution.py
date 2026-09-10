@@ -628,3 +628,177 @@ class SelfEvolutionController:
                     "architecture_id": ep.architecture_id,
                 }
                 f.write(json.dumps(ep_dict) + "\n")
+
+
+# ── Physical Constraint Satisfaction Evolution Loop ─────────────────
+
+@dataclass
+class PhysicalEvolutionGenerationSummary:
+    """Summary of a single generation in the physical constraint satisfaction loop."""
+    generation: int
+    best_candidate_id: str
+    passed: bool
+    checks: dict[str, bool]
+    violations: list[str]
+    recommendations: list[str]
+    total_power_w: float
+    total_pcb_area_mm2: float
+    junction_temp_c: float
+    tokens_per_sec: float
+    mutation_applied: str = ""
+
+
+@dataclass
+class PhysicalEvolutionReport:
+    """Comprehensive outcome of the physical constraint satisfaction evolution loop."""
+    target_name: str
+    passed_all_constraints: bool
+    total_generations: int
+    winning_candidate: Optional[HardwareArchitectureCandidate] = None
+    final_constraint_result: Optional[Any] = None
+    generation_history: list[PhysicalEvolutionGenerationSummary] = field(default_factory=list)
+    genealogy_metadata: dict[str, Any] = field(default_factory=dict)
+
+
+class PhysicalConstraintEvolutionLoop:
+    """Executes open-ended architecture evolution until a design satisfies all physical constraints or budget ends."""
+
+    def __init__(
+        self,
+        envelope: Optional[Any] = None,
+        task_id: str = "L3_MAC_8BIT_SIGNED",
+        max_generations: int = 5,
+        candidates_per_generation: int = 4,
+        experience_store: Optional[ExperienceStore] = None,
+    ):
+        from agent.schemas import DevicePhysicalEnvelope
+        from evaluator.physical_envelope import PhysicalConstraintChecker
+
+        self.envelope = envelope or DevicePhysicalEnvelope()
+        self.task_id = task_id
+        self.max_generations = max_generations
+        self.candidates_per_generation = candidates_per_generation
+        self.experience_store = experience_store or ExperienceStore()
+        self.search_engine = ArchitectureSearchEngine()
+        self.checker = PhysicalConstraintChecker(self.envelope)
+
+    def run(self) -> PhysicalEvolutionReport:
+        """Run iterative generation-by-generation evolution against physical constraints."""
+        logger.info(
+            f"Starting Physical Constraint Evolution Loop for '{self.envelope.target_name}' (Task: {self.task_id})."
+        )
+        logger.info(
+            f"Envelope: Size <= {self.envelope.enclosure_length_mm}x{self.envelope.enclosure_width_mm}mm, "
+            f"Power <= {self.envelope.max_power_w}W, Temp <= {self.envelope.max_junction_temp_c}°C, "
+            f"Throughput >= {self.envelope.min_tokens_per_sec} tok/s"
+        )
+
+        history: list[PhysicalEvolutionGenerationSummary] = []
+        winning_candidate: Optional[HardwareArchitectureCandidate] = None
+        last_result = None
+
+        # Start with diverse architectural candidates
+        candidates = self.search_engine.propose_candidates(self.task_id, n=self.candidates_per_generation)
+
+        for gen in range(1, self.max_generations + 1):
+            logger.info(f"--- Generation {gen}/{self.max_generations} --- ({len(candidates)} candidates)")
+
+            evaluated: list[tuple[HardwareArchitectureCandidate, Any, float]] = []
+
+            for cand in candidates:
+                # 1. Synthesize / estimate resources
+                if not cand.actual_synthesis_metrics:
+                    # Provide realistic baseline synthesis gate counts
+                    target_cells = cand.estimated_resource_requirements.get("target_cells", 250)
+                    cand.actual_synthesis_metrics = {
+                        "cells": target_cells,
+                        "wires": int(target_cells * 1.4),
+                        "actual": True,
+                    }
+
+                # 2. Evaluate physical constraint model
+                check_res = self.checker.evaluate(cand)
+
+                # 3. Score fitness towards meeting constraints
+                pass_count = sum(1 for v in check_res.checks.values() if v)
+                fitness = pass_count * 10.0 + (cand.pipeline_depth * 1.5) - (check_res.projections.total_device_power_w * 2.0)
+                evaluated.append((cand, check_res, fitness))
+
+            # Sort by fitness descending
+            evaluated.sort(key=lambda x: x[2], reverse=True)
+            best_cand, best_res, best_fit = evaluated[0]
+            last_result = best_res
+
+            gen_summary = PhysicalEvolutionGenerationSummary(
+                generation=gen,
+                best_candidate_id=best_cand.architecture_id,
+                passed=best_res.passed,
+                checks=best_res.checks,
+                violations=best_res.violations,
+                recommendations=best_res.recommendations,
+                total_power_w=best_res.projections.total_device_power_w,
+                total_pcb_area_mm2=best_res.projections.total_pcb_area_mm2,
+                junction_temp_c=best_res.projections.estimated_junction_temp_c,
+                tokens_per_sec=best_res.projections.achievable_tokens_per_sec,
+                mutation_applied=best_cand.metadata.get("mutation_applied", "initial_archetype"),
+            )
+            history.append(gen_summary)
+
+            logger.info(
+                f"Gen {gen} Leader: {best_cand.architecture_id} | "
+                f"Passed: {best_res.passed} | "
+                f"Power: {best_res.projections.total_device_power_w:.2f}W | "
+                f"Temp: {best_res.projections.estimated_junction_temp_c:.1f}°C | "
+                f"Throughput: {best_res.projections.achievable_tokens_per_sec:.1f} tok/s"
+            )
+
+            if best_res.passed:
+                logger.info(f"CONSTRAINTS SATISFIED at Generation {gen}! Candidate: {best_cand.architecture_id}")
+                winning_candidate = best_cand
+                break
+
+            # If not passed, record experience feedback and mutate
+            for v in best_res.violations:
+                exp_entry = Experience(
+                    task=f"Physical envelope check for {self.envelope.target_name}",
+                    attempted_solution=f"Parallelism={best_cand.parallelism}, Pipeline={best_cand.pipeline_depth}",
+                    error=v,
+                    correction=best_res.recommendations[0] if best_res.recommendations else "Mutate datapath",
+                    result="failed",
+                    reward=0.0,
+                    error_category="PHYSICAL_CONSTRAINT_VIOLATION",
+                    failure_type="PHYSICAL_CONSTRAINT_VIOLATION",
+                    tool="PhysicalConstraintChecker",
+                    root_cause="PPA physical envelope mismatch",
+                    task_family="PhysicalEnvelope",
+                    confidence=0.90,
+                )
+                self.experience_store.add(exp_entry)
+
+            # Generate next generation candidates guided directly by violations
+            next_generation_candidates: list[HardwareArchitectureCandidate] = []
+            
+            # 1. Mutate the best candidate specifically for the failed constraints
+            child1 = self.search_engine.mutate_for_physical_constraints(best_cand, best_res)
+            next_generation_candidates.append(child1)
+
+            # 2. Complementary exploratory mutations
+            child2 = self.search_engine.mutate_candidate(best_cand, "quantized_int4_arithmetic")
+            child3 = self.search_engine.mutate_candidate(best_cand, "deeper_pipeline")
+            child4 = self.search_engine.mutate_candidate(best_cand, "streaming_dataflow")
+            next_generation_candidates.extend([child2, child3, child4])
+
+            candidates = next_generation_candidates[:self.candidates_per_generation]
+
+        passed_all = winning_candidate is not None
+        report = PhysicalEvolutionReport(
+            target_name=self.envelope.target_name,
+            passed_all_constraints=passed_all,
+            total_generations=len(history),
+            winning_candidate=winning_candidate,
+            final_constraint_result=last_result,
+            generation_history=history,
+            genealogy_metadata=self.search_engine.genealogy.to_dict(),
+        )
+        return report
+

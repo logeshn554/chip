@@ -54,6 +54,14 @@ class KnowledgeMemory:
             class DeterministicEmbeddingFunction:
                 def __init__(self, dim: int = 384):
                     self.dim = dim
+                def name(self) -> str:
+                    return "default"
+                def embed_query(self, input: Any) -> list[list[float]] | list[float]:
+                    if isinstance(input, str):
+                        return self([input])[0]
+                    return self(input)
+                def embed_documents(self, input: list[str]) -> list[list[float]]:
+                    return self(input)
                 def __call__(self, input: list[str]) -> list[list[float]]:
                     embeddings = []
                     for text in input:

@@ -1,14 +1,58 @@
 # Self-Evolving Hardware Design Agent 🧠⚡
 
-A research prototype for an autonomous hardware design and verification agent built around a small local open-weight LLM (**Qwen3-4B / Qwen2.5-Coder-3B** via **Ollama**, **Transformers**, or **vLLM**). The agent conducts targeted technical research, generates synthesizable SystemVerilog, verifies it automatically via Verilator, Cocotb, SymbiYosys, and Yosys, inspects structured failure feedback, learns from previous episodes, and progressively evolves its designs.
+A research system for autonomous hardware architecture search, synthesizable SystemVerilog design, and physical constraint satisfaction driven by small local open-weight LLMs (**Qwen3-4B** via **Ollama**, **Transformers**, or **vLLM**).
 
-> **Key Architectural Principle**:
-> Qwen is the reasoning and planning engine.
-> The complete self-evolving environment = **Qwen3-4B + 4-Tier Memory + Targeted ScrapeGraphAI Research + EDA Verification Pipeline + Grounded Reward Engine + Trajectory Store + Gym RL Environment**.
+> ### 🎯 Top-Level Research Objective
+> **“Autonomously discover a hardware architecture that satisfies a configurable physical envelope and AI-performance specification, using LLM-guided architecture evolution and externally grounded EDA rewards.”**
+>
+> The agent does **not** stop after merely producing compilable RTL. It enters an open-ended architecture evolution loop and terminates only when the candidate design satisfies all mandatory functional, physical, performance, power, thermal, and interface constraints—or when a declared compute/search budget is exhausted.
 
 ---
 
-## 1. Target Architecture & Data Flow
+## 1. Physical Constraint Satisfaction & Hardware Evolution Loop
+
+```
+TARGET: "Design hardware for an independent portable AI device"
+Constraints (Configurable Envelope: configs/target_device_envelope.yaml):
+├── Maximum Physical Size (e.g. 100 mm × 30 mm × 12 mm enclosure, double-sided PCB)
+├── Maximum Power (e.g. 5.0 W USB-C bus powered limit)
+├── Maximum Thermal Limit (e.g. 85.0 °C max junction temp with passive cooling)
+├── Minimum Memory & Storage (e.g. 8 GB LPDDR4x/5 RAM, 256 GB UFS Flash)
+├── Connectivity Interface (e.g. USB-C 3.2 Gen 2)
+├── Target AI Workload (e.g. Qwen3-4B-INT4 quantized parameters)
+└── Required Compute Throughput (e.g. >= 12-15 tokens/sec interactive decode)
+       ↓
+[LLM Proposes Architecture Hypothesis] (Datapath, Pipeline Depth, Parallelism, Memory)
+       ↓
+[Generate Synthesizable SystemVerilog]
+       ↓
+[EDA Verification] (Verilator Lint/Compile, Cocotb Functional Vectors, SymbiYosys Formal)
+       ↓
+[Logic Synthesis & PPA] (Yosys Standard Cell Synthesis, Gate Counts, Fmax)
+       ↓
+[Physical Constraint & System Integration Model] (Die Size, PCB Geometry, Thermal, BW)
+       ↓
+    DOES DESIGN PASS ALL CONSTRAINTS?
+       ├── NO  ──> Analyze failure (size? power? thermal? throughput?)
+       │           Record structured failure context in Experience Store
+       │           Generate constraint-guided architecture mutations
+       │           Repeat loop ────────┐
+       │                               │
+       └── YES ──> [WINNING ARCHITECTURE PROMOTED & PERSISTED]
+```
+
+### Physical Reality & Implementation Modeling (`evaluator/physical_envelope.py`)
+RTL simulation alone cannot prove that a real pendrive- or pocket-sized device will fit or dissipate acceptable power. The system integrates a grounded **Physical Constraint & System Integration Model**:
+- **Digital Die Area**: Scaled from synthesized cell counts and process node gate density (28nm / 14nm / 7nm).
+- **Package Footprints & PCB Area**: Aggregates flip-chip BGA, 8GB LPDDR4x/5 package (144 mm²), 256GB UFS BGA (149.5 mm²), PMIC/passives, and USB-C receptacle against usable double-sided PCB area.
+- **System Power Modeling**: Sums dynamic ASIC switching, static leakage, active DRAM I/O, storage bursts, and PMIC loss.
+- **Passive Thermal Model**: Grounded silicon junction temperature $T_j = T_{\text{ambient}} + P_{\text{total}} \times \theta_{ja}$ (e.g. 10 °C/W aluminum body).
+- **AI Token Throughput Bottleneck**: Evaluates both compute-bound FLOPs and memory-bandwidth bound decode: $\min(BW_{\text{eff}} / \text{Size}_{\text{token}}, TOPS / \text{FLOPs}_{\text{token}})$.
+- **Empirical Evolution**: Progresses across generations (e.g. Gen 1 fails throughput $\rightarrow$ Gen 2 mutates pipeline $\rightarrow$ Gen 3 scales parallel lanes $\rightarrow$ Gen 3 satisfies all constraints!).
+
+---
+
+## 2. Target Architecture & Data Flow
 
 ```
 ┌────────────────────────────────────────────────────────┐
@@ -222,10 +266,11 @@ pip install -r requirements.txt
 python main.py status
 ```
 
-### Step 3: Run Full Test Suite (71 Tests)
+### Step 3: Run Full Test Suite (164 Tests)
 ```bash
 python -m pytest tests/ -v
 ```
+*(Runs 164 test cases covering JSON parsing, physical envelope modeling, error recovery, security path restriction, formal verification, Scraping filters, reward math, vector wrappers, active Gymnasium environment, curriculum benchmark resolution, and concurrent GRPO batching).*
 
 ### Step 4: Run Reproducible Architecture Evolution Pilot
 ```bash
@@ -233,7 +278,13 @@ python scripts/run_evolution_pilot.py
 ```
 *(Executes multi-generation evolution on `L3_MAC_8BIT_SIGNED`, evaluates held-out benchmark before and after, performs promotion and rollback, and saves `pilot_report.json` and `genealogy.json`).*
 
-### Step 5: Run End-to-End Autonomous Agent Milestone
+### Step 5: Run Physical Envelope Constraint Satisfaction Evolution
+```bash
+python scripts/run_physical_envelope_evolution.py
+```
+*(Runs open-ended multi-generation architecture search against the 100x30x12mm, 5W, 85°C, 8GB RAM, USB-C, Qwen3-4B-INT4 >= 12-15 tok/s physical envelope until all constraints pass).*
+
+### Step 6: Run End-to-End Autonomous Agent Milestone
 ```bash
 python scripts/run_mac_milestone.py
 ```

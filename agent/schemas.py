@@ -395,3 +395,67 @@ class SearchResult:
     snippet: str
     content: str = ""
     relevance: float = 0.0
+
+
+# ── Physical Envelope & Hardware Target Constraints ─────────────────
+
+@dataclass
+class DevicePhysicalEnvelope:
+    """Configurable physical, power, thermal, and performance envelope for the target device."""
+    target_name: str = "Portable Independent AI Device"
+    enclosure_length_mm: float = 100.0
+    enclosure_width_mm: float = 30.0
+    enclosure_height_mm: float = 12.0
+    max_power_w: float = 5.0
+    max_junction_temp_c: float = 85.0
+    ambient_temp_c: float = 30.0
+    thermal_resistance_c_per_w: float = 10.0  # Passive aluminum heat dissipation theta_ja
+    min_ram_gb: float = 8.0
+    min_storage_gb: float = 256.0
+    interface_type: str = "USB-C"
+    target_model_name: str = "Qwen3-4B-INT4"
+    target_model_params_b: float = 4.0
+    weight_bits: int = 4
+    min_tokens_per_sec: float = 15.0
+    max_latency_ms: float = 200.0
+
+    @property
+    def max_pcb_area_mm2(self) -> float:
+        """Usable double-sided PCB area with 2mm wall clearance (approx 90% usable per side)."""
+        usable_l = max(0.0, self.enclosure_length_mm - 4.0)
+        usable_w = max(0.0, self.enclosure_width_mm - 4.0)
+        return usable_l * usable_w * 1.8  # Double-sided layout with pass-through margins
+
+
+@dataclass
+class PhysicalProjectionMetrics:
+    """Physical hardware projections derived from digital RTL synthesis and system component modeling."""
+    digital_die_area_mm2: float = 0.0
+    asic_package_area_mm2: float = 0.0
+    dram_package_area_mm2: float = 0.0
+    storage_package_area_mm2: float = 0.0
+    pmic_passives_area_mm2: float = 0.0
+    usbc_connector_area_mm2: float = 0.0
+    total_component_area_mm2: float = 0.0
+    total_pcb_area_mm2: float = 0.0
+    asic_power_w: float = 0.0
+    dram_power_w: float = 0.0
+    system_overhead_power_w: float = 0.0
+    total_device_power_w: float = 0.0
+    estimated_junction_temp_c: float = 0.0
+    effective_memory_bandwidth_gbps: float = 0.0
+    compute_tops: float = 0.0
+    achievable_tokens_per_sec: float = 0.0
+    bottleneck: str = "balanced"  # "memory_bandwidth", "compute", "thermal_throttled"
+
+
+@dataclass
+class ConstraintCheckResult:
+    """Detailed result of checking an architecture candidate against the physical envelope."""
+    passed: bool = False
+    checks: dict[str, bool] = field(default_factory=dict)
+    violations: list[str] = field(default_factory=list)
+    recommendations: list[str] = field(default_factory=list)
+    projections: PhysicalProjectionMetrics = field(default_factory=PhysicalProjectionMetrics)
+    envelope_name: str = ""
+

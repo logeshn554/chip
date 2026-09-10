@@ -114,6 +114,10 @@ class ArchitectureGenealogy:
             "edges": [asdict(e) for e in self.edges],
         }
 
+    def to_dict(self) -> dict[str, Any]:
+        """Alias for export_genealogy_metadata."""
+        return self.export_genealogy_metadata()
+
     def save_to_file(self, filepath: str) -> None:
         """Persist genealogy to a JSON file."""
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
@@ -130,7 +134,7 @@ class ArchitectureSearchEngine:
     def propose_candidates(
         self,
         task_id: str,
-        task_description: str,
+        task_description: str = "",
         n: int = 4,
         parent_candidate: Optional[HardwareArchitectureCandidate] = None,
         past_experiences: Optional[list[dict[str, Any]]] = None,
@@ -297,8 +301,18 @@ class ArchitectureSearchEngine:
         elif mutation_type == "staged_memory_access":
             interface = "dma_burst_ready"
             buffering = "ring_buffer"
+        elif mutation_type == "quantized_int4_arithmetic":
+            arithmetic = "quantized_int4_shared"
+            est_res["target_cells"] = max(est_res.get("target_cells", 150) * 0.55, 45)
+        elif mutation_type == "shared_multiplier":
+            arithmetic = "time_multiplexed_shared"
+            est_res["target_cells"] = max(est_res.get("target_cells", 150) * 0.70, 50)
+        elif mutation_type == "streaming_dataflow":
+            mem_org = "streaming"
+            buffering = "double_buffering"
+            interface = "axis_streaming"
 
-        return HardwareArchitectureCandidate(
+        child = HardwareArchitectureCandidate(
             architecture_id=child_id,
             task_id=candidate.task_id,
             parent_architecture_id=candidate.architecture_id,
@@ -313,6 +327,50 @@ class ArchitectureSearchEngine:
             generation=new_gen,
             metadata={"mutation_applied": mutation_type, "parent": candidate.architecture_id},
         )
+        return child
+
+    def mutate_for_physical_constraints(
+        self,
+        candidate: HardwareArchitectureCandidate,
+        constraint_result: Any,
+    ) -> HardwareArchitectureCandidate:
+        """Derive a targeted architectural mutation guided directly by physical constraint diagnostics."""
+        checks = getattr(constraint_result, "checks", {})
+
+        # 1. Size / PCB area or Power violations take highest priority (hard physical wall)
+        if not checks.get("size_fit", True) or not checks.get("power_fit", True):
+            if candidate.parallelism > 1:
+                mutation = "less_parallelism"
+            elif "quantized" not in candidate.arithmetic_strategy:
+                mutation = "quantized_int4_arithmetic"
+            elif "shared" not in candidate.arithmetic_strategy:
+                mutation = "shared_multiplier"
+            else:
+                mutation = "shallower_pipeline"
+
+        # 2. Thermal violation: switch to streaming dataflow or lower clock burden
+        elif not checks.get("thermal_fit", True):
+            if candidate.memory_organization != "streaming":
+                mutation = "streaming_dataflow"
+            else:
+                mutation = "quantized_int4_arithmetic"
+
+        # 3. Throughput violation: deepen pipeline or increase parallelism
+        elif not checks.get("throughput_fit", True):
+            if candidate.pipeline_depth < 3:
+                mutation = "deeper_pipeline"
+            elif candidate.parallelism < 4:
+                mutation = "more_parallel_lanes"
+            else:
+                mutation = "systolic_organization"
+
+        else:
+            # All mandatory constraints pass -> explore PPA optimization (e.g. local SRAM or systolic)
+            mutation = "local_sram"
+
+        child = self.mutate_candidate(candidate, mutation)
+        self.genealogy.register_candidate(child, parent_id=candidate.architecture_id, mutation_type=mutation)
+        return child
 
     def rank_candidates(
         self,
