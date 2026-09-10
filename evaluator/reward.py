@@ -154,11 +154,14 @@ class RewardEngine:
         timing_ns: Optional[float] = None,
         timing_target: float = 5.0,
         power_uw: Optional[float] = None,
+        evaluation_mode: str = "research_fast",  # "research_fast" | "research_strict"
     ) -> GroundedRewardResult:
         """Modular multi-objective reward with normalized weights and strict hard gates.
 
-        Formula:
-        R = w_correctness * R_correctness + w_formal * R_formal + w_area * R_area + w_timing * R_timing + w_power * R_power
+        Modes:
+        - 'research_fast': Formal and synthesis are optional; unavailable tools re-normalize weights.
+        - 'research_strict': Formal and real logic synthesis are mandatory; skipped/unavailable
+          tools fail strict gates and cannot obtain high reward.
         """
         # Hard Gate 1: Compile check
         if not compile_success:
@@ -171,7 +174,10 @@ class RewardEngine:
                 total_reward=0.0,
                 normalized_reward=0.0,
                 is_valid_hardware=False,
-                breakdown={"gate_failed": "Compilation failed. Design quality = 0.0"},
+                breakdown={
+                    "evaluation_mode": evaluation_mode,
+                    "gate_failed": "Compilation failed. Design quality = 0.0",
+                },
             )
 
         # Hard Gate 2: Mandatory functional pass
@@ -186,11 +192,48 @@ class RewardEngine:
                 total_reward=r_corr,
                 normalized_reward=r_corr,
                 is_valid_hardware=False,
-                breakdown={"gate_failed": "Mandatory functional tests failed. No synthesis/area reward credited."},
+                breakdown={
+                    "evaluation_mode": evaluation_mode,
+                    "gate_failed": "Mandatory functional tests failed. No synthesis/area reward credited.",
+                },
             )
 
         # Correctness is 1.0
         r_correctness = 1.0
+
+        # Strict Mode Gate: Formal verification mandatory in research_strict
+        if evaluation_mode == "research_strict" and formal_status != "PASS":
+            return GroundedRewardResult(
+                compile_score=1.0,
+                functional_score=3.0,
+                synthesis_score=0.0,
+                lint_score=1.0,
+                formal_score=0.0,
+                total_reward=0.3,
+                normalized_reward=0.3,
+                is_valid_hardware=False,
+                breakdown={
+                    "evaluation_mode": evaluation_mode,
+                    "gate_failed": f"Formal verification mandatory in research_strict mode, but status was '{formal_status}'.",
+                },
+            )
+
+        # Strict Mode Gate: Real synthesis mandatory in research_strict
+        if evaluation_mode == "research_strict" and (area is None or area <= 0):
+            return GroundedRewardResult(
+                compile_score=1.0,
+                functional_score=4.0,
+                synthesis_score=0.0,
+                lint_score=1.0,
+                formal_score=1.0 if formal_status == "PASS" else 0.0,
+                total_reward=0.4,
+                normalized_reward=0.4,
+                is_valid_hardware=False,
+                breakdown={
+                    "evaluation_mode": evaluation_mode,
+                    "gate_failed": "Actual logic synthesis mandatory in research_strict mode, but area was unavailable or 0.",
+                },
+            )
 
         # Formal verification score
         if formal_status == "PASS":
@@ -206,7 +249,10 @@ class RewardEngine:
                 total_reward=0.3,
                 normalized_reward=0.3,
                 is_valid_hardware=False,
-                breakdown={"gate_failed": "Formal assertion violation detected by SymbiYosys."},
+                breakdown={
+                    "evaluation_mode": evaluation_mode,
+                    "gate_failed": "Formal assertion violation detected by SymbiYosys.",
+                },
             )
         # Multi-objective active metric weight re-normalization:
         # Never award free 1.0 points to unmeasured/unavailable metrics.
@@ -257,6 +303,7 @@ class RewardEngine:
         unmeasured = [m for m in ["formal", "area", "timing", "power"] if m not in active_objectives]
 
         breakdown = {
+            "evaluation_mode": evaluation_mode,
             "configured_weights": {
                 "correctness": self.w_correctness,
                 "formal": self.w_formal,

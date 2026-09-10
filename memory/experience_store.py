@@ -38,6 +38,8 @@ class Experience:
     result: str  # "passed", "failed"
     reward: float = 0.0
     tool_sequence: list[str] = field(default_factory=list)
+    error_category: str = "GENERAL"  # "SYNTAX_LINT", "FUNCTIONAL_ASSERT", "SYNTHESIS_ERROR", "FORMAL_FAIL"
+    error_signature: str = ""
     id: str = ""
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -48,7 +50,27 @@ class Experience:
 
     def to_embedding_text(self) -> str:
         """Text used for embedding similarity retrieval."""
-        return f"Task: {self.task}\nError: {self.error}\nAttempted: {self.attempted_solution[:200]}"
+        return (
+            f"Category: {self.error_category}\n"
+            f"Task: {self.task}\n"
+            f"Error Signature: {self.error_signature or self.error[:150]}\n"
+            f"Error: {self.error[:300]}\n"
+            f"Correction: {self.correction[:300]}"
+        )
+
+
+def categorize_error(error_text: str) -> str:
+    """Categorize hardware error message into explicit failure taxonomy."""
+    low = (error_text or "").lower()
+    if any(k in low for k in ["formal", "sby", "bmc", "assertion violation"]):
+        return "FORMAL_FAIL"
+    elif any(k in low for k in ["%error-width", "%error-syntax", "syntax error", "undeclared", "expected", "lint"]):
+        return "SYNTAX_LINT"
+    elif any(k in low for k in ["assert", "test failed", "cocotb", "mismatch", "failed test"]):
+        return "FUNCTIONAL_ASSERT"
+    elif any(k in low for k in ["synthesis error", "cannot be synthesized", "yosys", "techmap"]):
+        return "SYNTHESIS_ERROR"
+    return "GENERAL"
 
 
 class ExperienceStore:
@@ -78,6 +100,8 @@ class ExperienceStore:
                 correction="acc_reg <= acc_reg + {{ (ACC_WIDTH - 2*DATA_WIDTH){product[2*DATA_WIDTH-1]} }, product};",
                 result="passed",
                 reward=8.0,
+                error_category="SYNTAX_LINT",
+                error_signature="%Error-WIDTH: Operator '+' expects 32 bits, RHS 16 bits",
                 tool_sequence=["CREATE_RTL", "RUN_VERILATOR", "INSPECT_ERROR", "EDIT_RTL", "RUN_VERILATOR", "RUN_COCOTB", "RUN_YOSYS"],
             ),
             Experience(
@@ -87,7 +111,20 @@ class ExperienceStore:
                 correction="Change input port declarations to: input logic signed [DATA_WIDTH-1:0] a, b;",
                 result="passed",
                 reward=8.0,
+                error_category="FUNCTIONAL_ASSERT",
+                error_signature="Functional test failed: negative multiplication sign bit error",
                 tool_sequence=["CREATE_RTL", "RUN_COCOTB", "INSPECT_ERROR", "EDIT_RTL", "RUN_COCOTB"],
+            ),
+            Experience(
+                task="Synthesizable delays in RTL",
+                attempted_solution="#10 clk = ~clk; // Unsynthesizable delay construct",
+                error="Synthesis error: Delays (#t) cannot be synthesized into physical logic.",
+                correction="Use clocked sequential registers (always_ff @(posedge clk)) instead of simulation delays.",
+                result="passed",
+                reward=8.0,
+                error_category="SYNTHESIS_ERROR",
+                error_signature="Synthesis error: Delays (#t) cannot be synthesized",
+                tool_sequence=["CREATE_RTL", "RUN_YOSYS", "INSPECT_ERROR", "EDIT_RTL", "RUN_YOSYS"],
             ),
         ]
         for exp in seed_cases:
@@ -104,6 +141,8 @@ class ExperienceStore:
             "timestamp": exp.timestamp,
             "correction": exp.correction,
             "error": exp.error,
+            "error_category": exp.error_category,
+            "error_signature": exp.error_signature,
         }
         self.collection.upsert(
             ids=[exp.id],
@@ -112,6 +151,46 @@ class ExperienceStore:
         )
         return exp.id
 
+    def record_episode_experience(self, episode: Any) -> list[str]:
+        """Deconstruct an episode into first-class failure/fix experiences."""
+        steps = getattr(episode, "steps", []) or []
+        added_ids = []
+
+        for i in range(len(steps) - 1):
+            curr = steps[i]
+            nxt = steps[i + 1]
+
+            curr_obs = getattr(curr, "observation", "") or ""
+            nxt_obs = getattr(nxt, "observation", "") or ""
+            curr_rew = getattr(curr, "reward", 0.0) or 0.0
+            nxt_rew = getattr(nxt, "reward", 0.0) or 0.0
+
+            has_error = "error" in curr_obs.lower() or "failed" in curr_obs.lower() or curr_rew < 0
+            is_fixed = "passed" in nxt_obs.lower() or nxt_rew > curr_rew
+
+            if has_error and is_fixed:
+                curr_params = getattr(curr, "action_params", {}) or {}
+                nxt_params = getattr(nxt, "action_params", {}) or {}
+                attempted = curr_params.get("code", curr_params.get("current_rtl", str(curr_params)))
+                correction = nxt_params.get("code", nxt_params.get("current_rtl", str(nxt_params)))
+                cat = categorize_error(curr_obs)
+
+                exp = Experience(
+                    task=getattr(episode, "task", ""),
+                    attempted_solution=str(attempted)[:300],
+                    error=curr_obs[:300],
+                    correction=str(correction)[:300],
+                    result="passed",
+                    reward=getattr(episode, "final_reward", 0.0),
+                    error_category=cat,
+                    error_signature=curr_obs[:120],
+                    tool_sequence=[s.action for s in steps],
+                )
+                exp_id = self.add(exp)
+                added_ids.append(exp_id)
+
+        return added_ids
+
     def retrieve_similar_failures(
         self,
         error_text: str,
@@ -119,7 +198,8 @@ class ExperienceStore:
         n_results: int = 2,
     ) -> list[dict[str, Any]]:
         """Find past experiences addressing similar errors."""
-        query_text = f"Task: {task}\nError: {error_text}"
+        cat = categorize_error(error_text)
+        query_text = f"Category: {cat}\nTask: {task}\nError: {error_text}"
         if self.collection.count() == 0:
             return []
 
@@ -144,6 +224,40 @@ class ExperienceStore:
                     "correction": meta.get("correction", ""),
                     "result": meta.get("result", ""),
                     "reward": meta.get("reward", 0.0),
+                    "error_category": meta.get("error_category", "GENERAL"),
                     "tool_sequence": tools,
+                })
+        return matches
+
+    def retrieve_experiences_for_task(
+        self,
+        task: str,
+        current_error: Optional[str] = None,
+        n_results: int = 2,
+    ) -> list[dict[str, Any]]:
+        """Retrieve relevant past debugging lessons and reference patterns for a task."""
+        if current_error:
+            return self.retrieve_similar_failures(error_text=current_error, task=task, n_results=n_results)
+
+        query_text = f"Task: {task}\nRelevant design practices and past hardware solutions"
+        if self.collection.count() == 0:
+            return []
+
+        results = self.collection.query(
+            query_texts=[query_text],
+            n_results=min(n_results, self.collection.count()),
+        )
+        matches = []
+        if results and results.get("documents"):
+            docs = results["documents"][0]
+            metas = results["metadatas"][0] if results.get("metadatas") else [{}] * len(docs)
+            for doc, meta in zip(docs, metas):
+                matches.append({
+                    "task": meta.get("task", ""),
+                    "error": meta.get("error", ""),
+                    "correction": meta.get("correction", ""),
+                    "result": meta.get("result", ""),
+                    "reward": meta.get("reward", 0.0),
+                    "error_category": meta.get("error_category", "GENERAL"),
                 })
         return matches

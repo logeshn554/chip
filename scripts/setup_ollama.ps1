@@ -7,11 +7,11 @@ if (-not $ollamaCmd) {
     $defaultOllama = "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe"
     if (Test-Path $defaultOllama) {
         Write-Host "Found Ollama at: $defaultOllama" -ForegroundColor Green
-        & $defaultOllama pull qwen2.5-coder:3b
+        & $defaultOllama pull qwen3:4b
     } else {
         Write-Host "Ollama executable not found. Please install Ollama from https://ollama.com" -ForegroundColor Red
     }
 } else {
-    Write-Host "Pulling qwen2.5-coder:3b..." -ForegroundColor Green
-    ollama pull qwen2.5-coder:3b
+    Write-Host "Pulling qwen3:4b..." -ForegroundColor Green
+    ollama pull qwen3:4b
 }

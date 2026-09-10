@@ -104,8 +104,20 @@ class YosysTool:
             "raw_log": "Generated via internal static synthesizability analyzer.",
         }
 
-    async def synthesize(self, file_path: str, top_module: str = "mac") -> dict[str, Any]:
-        """Run Yosys synthesis script or internal synthesizability analysis."""
+    async def synthesize(
+        self,
+        file_path: str,
+        top_module: str = "mac",
+        allow_heuristic_fallback: bool = True,
+    ) -> dict[str, Any]:
+        """Run Yosys synthesis script or internal synthesizability analysis.
+        
+        Args:
+            file_path: Path to RTL source file.
+            top_module: Top-level module name.
+            allow_heuristic_fallback: If False, does not produce heuristic estimates
+                when Yosys is missing or fails (required for trustworthy RL/GRPO training).
+        """
         # Resolve path
         resolved_path = file_path
         if not os.path.exists(resolved_path):
@@ -190,7 +202,26 @@ class YosysTool:
                         "raw_log": output,
                     }
             except Exception as e:
-                logger.warning(f"Native Yosys execution failed: {e}. Falling back to static synthesizability analysis.")
+                logger.warning(f"Native Yosys execution failed: {e}.")
+                if not allow_heuristic_fallback:
+                    return {
+                        "stage": "yosys",
+                        "status": "failed",
+                        "metric_type": "none",
+                        "error": f"Native Yosys execution failed: {e}",
+                        "file": resolved_path,
+                        "line": None,
+                    }
+
+        if not allow_heuristic_fallback:
+            return {
+                "stage": "yosys",
+                "status": "unavailable",
+                "metric_type": "none",
+                "error": "Yosys binary not available and heuristic fallback disabled.",
+                "file": resolved_path,
+                "line": None,
+            }
 
         return self.analyze_synthesizability(code, top_module=top_module)
 
@@ -200,4 +231,5 @@ class YosysTool:
         if isinstance(file_path, list):
             file_path = file_path[0] if file_path else "mac.sv"
         top_module = kwargs.get("top_module", "mac")
-        return await self.synthesize(file_path, top_module)
+        allow_heuristic = kwargs.get("allow_heuristic_fallback", True)
+        return await self.synthesize(file_path, top_module, allow_heuristic_fallback=allow_heuristic)

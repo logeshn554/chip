@@ -60,6 +60,13 @@ logger = logging.getLogger(__name__)
 PRINTABLE_CHARSET = set(string.printable)
 
 
+def _sanitize_printable(val: Any, max_len: int) -> str:
+    """Ensure string strictly conforms to PRINTABLE_CHARSET and max_length for spaces.Text."""
+    text = str(val or "")
+    clean = "".join(ch for ch in text if ch in PRINTABLE_CHARSET)
+    return clean[:max_len]
+
+
 class HardwareDesignEnv(gym.Env):
     """Gymnasium reinforcement learning environment for autonomous hardware design tasks."""
 
@@ -155,6 +162,10 @@ class HardwareDesignEnv(gym.Env):
         self.cells_count = 0
         self.history: list[dict[str, Any]] = []
 
+    def get_reward(self) -> float:
+        """Return the current grounded design quality reward for TRL environment rollouts."""
+        return float(self.current_design_quality)
+
     def reset(
         self,
         seed: Optional[int] = None,
@@ -187,12 +198,12 @@ class HardwareDesignEnv(gym.Env):
                 pass
 
         observation = {
-            "task": str(self.task)[:500],
-            "step": np.array(self.current_step, dtype=np.int32),
+            "task": _sanitize_printable(self.task, 500),
+            "step": np.array(min(self.current_step, self.max_steps + 1), dtype=np.int32),
             "current_rtl": "",
             "last_error": "",
-            "best_reward": np.array(0.0, dtype=np.float32),
-            "current_reward": np.array(0.0, dtype=np.float32),
+            "best_reward": np.array(np.clip(self.best_design_quality, 0.0, 1.0), dtype=np.float32),
+            "current_reward": np.array(np.clip(self.current_design_quality, 0.0, 1.0), dtype=np.float32),
             "status": "ready",
             "retrieved_context": "",
         }
@@ -406,14 +417,14 @@ class HardwareDesignEnv(gym.Env):
                 pass
 
         next_obs = {
-            "task": str(self.task)[:500],
-            "step": np.array(self.current_step, dtype=np.int32),
-            "current_rtl": current_code[:4000],
-            "last_error": self.last_error[:1000],
-            "best_reward": np.array(self.best_design_quality, dtype=np.float32),
-            "current_reward": np.array(self.current_design_quality, dtype=np.float32),
-            "status": "done" if (terminated or truncated) else "in_progress",
-            "retrieved_context": self.last_retrieved_context[:2000],
+            "task": _sanitize_printable(self.task, 500),
+            "step": np.array(min(self.current_step, self.max_steps + 1), dtype=np.int32),
+            "current_rtl": _sanitize_printable(current_code, 4000),
+            "last_error": _sanitize_printable(self.last_error, 1000),
+            "best_reward": np.array(np.clip(self.best_design_quality, 0.0, 1.0), dtype=np.float32),
+            "current_reward": np.array(np.clip(self.current_design_quality, 0.0, 1.0), dtype=np.float32),
+            "status": _sanitize_printable("done" if (terminated or truncated) else "in_progress", 50),
+            "retrieved_context": _sanitize_printable(self.last_retrieved_context, 2000),
         }
 
         info["episode_return"] = round(self.episode_return, 4)
@@ -492,9 +503,18 @@ class QwenHardwareDesignPolicy:
         EDA Tools & RewardEngine
     """
 
-    def __init__(self, llm_client: Any = None, model: str = "qwen2.5-coder:3b"):
+    def __init__(self, llm_client: Any = None, model: Optional[str] = None):
         self.llm = llm_client
-        self.model = model
+        if model is None:
+            try:
+                import yaml
+                with open("configs/agent.yaml", "r", encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f)
+                self.model = str(cfg.get("llm", {}).get("model_name", "qwen3:4b"))
+            except Exception:
+                self.model = "qwen3:4b"
+        else:
+            self.model = model
 
     def select_action(self, obs: dict[str, Any]) -> dict[str, Any]:
         """Heuristic / LLM action selection based on current environment state."""

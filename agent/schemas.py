@@ -279,9 +279,9 @@ class EvaluationResult:
 @dataclass
 class TrajectoryStep:
     """A single step in a trajectory episode."""
-    step_index: int
-    state_summary: str
-    action: str
+    step_index: int = 0
+    action: str = ""
+    state_summary: str = ""
     action_params: dict[str, Any] = field(default_factory=dict)
     observation: str = ""
     reward: float = 0.0

@@ -41,15 +41,15 @@ class QwenClient(LLMInterface):
         self.config = merged
 
         self.backend = merged.get("backend", "ollama")
-        self.model_name = merged.get("model_name", merged.get("model", "qwen2.5-coder:3b"))
+        self.model_name = merged.get("model_name", merged.get("model", "qwen3:4b"))
         self.max_new_tokens = int(merged.get("max_new_tokens", merged.get("max_tokens", 8192)))
         self.temperature = float(merged.get("temperature", 0.7))
         self.top_p = float(merged.get("top_p", 0.9))
         self.enable_thinking = bool(merged.get("enable_thinking", True))
         self.timeout = float(merged.get("timeout", 60.0))
-        self.mock_mode = bool(merged.get("mock_mode", False))
+        self.mock_mode = bool(merged.get("mock_mode", False) or os.environ.get("LLM_PROVIDER") == "mock")
 
-        self.ollama_host = merged.get("ollama_host", "http://localhost:11434")
+        self.ollama_host = merged.get("ollama_host", merged.get("ollama", {}).get("base_url", "http://localhost:11434"))
 
         # Lazy backends
         self._model = None
@@ -142,19 +142,14 @@ class QwenClient(LLMInterface):
             res.generation_time_s = time.time() - start_time
             return res
 
-        try:
-            if self.backend == "ollama":
-                res = await self._generate_ollama(normalized_messages, temp, max_tok)
-            elif self.backend == "transformers":
-                res = await self._generate_transformers(normalized_messages, temp, max_tok)
-            elif self.backend == "vllm":
-                res = await self._generate_vllm(normalized_messages, temp, max_tok)
-            else:
-                # Default to ollama with fallback
-                res = await self._generate_ollama(normalized_messages, temp, max_tok)
-        except Exception as e:
-            logger.warning(f"Backend '{self.backend}' failed ({e}). Using deterministic offline fallback.")
-            res = self._generate_mock(normalized_messages)
+        if self.backend == "ollama":
+            res = await self._generate_ollama(normalized_messages, temp, max_tok)
+        elif self.backend == "transformers":
+            res = await self._generate_transformers(normalized_messages, temp, max_tok)
+        elif self.backend == "vllm":
+            res = await self._generate_vllm(normalized_messages, temp, max_tok)
+        else:
+            res = await self._generate_ollama(normalized_messages, temp, max_tok)
 
         # Process thinking tags if requested
         if thinking_enabled and not res.thinking:
@@ -165,15 +160,67 @@ class QwenClient(LLMInterface):
         res.generation_time_s = time.time() - start_time
         return res
 
+    def verify_model_installed(self) -> None:
+        """Check Ollama connectivity and verify that model is installed."""
+        if self.mock_mode or self.backend == "mock" or os.environ.get("LLM_PROVIDER") == "mock":
+            return
+        if self.backend != "ollama":
+            return
+
+        url = f"{self.ollama_host}/api/tags"
+        try:
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=min(self.timeout, 10.0)) as resp:
+                resp_bytes = resp.read()
+                if not resp_bytes:
+                    raise RuntimeError("Ollama returned empty response for /api/tags")
+                data = json.loads(resp_bytes.decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            raise RuntimeError(
+                f"Ollama request failed: HTTP {e.code}. URL={url}, model={self.model_name}"
+            ) from e
+        except urllib.error.URLError as e:
+            raise RuntimeError(
+                f"Cannot connect to Ollama at {self.ollama_host}. Ensure Ollama is running."
+            ) from e
+
+        models = data.get("models", [])
+        installed_names = []
+        for m in models:
+            if isinstance(m, dict):
+                if "name" in m:
+                    installed_names.append(m["name"])
+                if "model" in m:
+                    installed_names.append(m["model"])
+
+        target = self.model_name.lower()
+        matched = any(
+            target == name.lower()
+            or name.lower().startswith(f"{target}:")
+            or f"{target}:latest" == name.lower()
+            or (":" not in target and name.lower().split(":")[0] == target)
+            for name in installed_names
+        )
+
+        if not matched:
+            raise RuntimeError("Qwen3-4B is not installed in Ollama. Run: ollama pull qwen3:4b")
+
     async def complete(self, messages: list[Message], **kwargs: Any) -> LLMResponse:
         """Implementation of LLMInterface.complete."""
         resp = await self.generate(messages, **kwargs)
         return LLMResponse(
             content=resp.content,
+            text=resp.content,
             raw_response=resp.raw_output,
             reasoning=resp.thinking,
             tokens_used=resp.tokens_used,
             model=self.model_name,
+            metadata={
+                "provider": self.backend,
+                "model": self.model_name,
+                "base_url": self.ollama_host,
+                "fallback_used": bool(self.mock_mode or self.backend == "mock"),
+            },
         )
 
     # ── Backend Implementations ──────────────────────────────────────
@@ -202,8 +249,20 @@ class QwenClient(LLMInterface):
         )
 
         def _call_ollama():
-            with urllib.request.urlopen(req, timeout=self.timeout) as response:
-                return json.loads(response.read().decode("utf-8"))
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as response:
+                    resp_bytes = response.read()
+                    if not resp_bytes:
+                        raise RuntimeError("Ollama returned empty response")
+                    return json.loads(resp_bytes.decode("utf-8"))
+            except urllib.error.HTTPError as e:
+                raise RuntimeError(
+                    f"Ollama request failed: HTTP {e.code}. URL={url}, model={self.model_name}"
+                ) from e
+            except urllib.error.URLError as e:
+                raise RuntimeError(
+                    f"Cannot connect to Ollama at {self.ollama_host}. Ensure Ollama is running."
+                ) from e
 
         loop = asyncio.get_event_loop()
         res_json = await loop.run_in_executor(None, _call_ollama)

@@ -50,6 +50,20 @@ class RLTransition:
         }
 
 
+def normalize_rtl_for_dedup(code: str) -> str:
+    """Normalize SystemVerilog RTL by stripping comments and normalizing whitespace."""
+    if not code:
+        return ""
+    import re
+    # Remove single-line comments
+    clean = re.sub(r"//.*$", "", code, flags=re.MULTILINE)
+    # Remove multi-line comments
+    clean = re.sub(r"/\*.*?\*/", "", clean, flags=re.DOTALL)
+    # Collapse multiple whitespace characters into a single space
+    clean = " ".join(clean.split())
+    return clean
+
+
 class TrajectoryDatasetBuilder:
     """Builds reproducible training datasets from stored trajectories."""
 
@@ -75,21 +89,43 @@ class TrajectoryDatasetBuilder:
             episodes: Input list of episodes
             min_reward: Minimum final reward threshold
             require_success: Whether episode must be flagged success
-            deduplicate: Filter out identical trajectories
+            deduplicate: Filter out identical trajectories using multi-attribute hash
+                         (benchmark_id + normalized RTL + action sequence + verification result)
         """
         filtered = []
         seen_hashes = set()
 
         for ep in episodes:
+            meta = getattr(ep, "metadata", {}) or {}
+            if meta.get("fallback_used") is True or getattr(ep, "fallback_used", False) is True:
+                logger.debug(f"Invalidating episode {getattr(ep, 'episode_id', '')}: fallback_used is True")
+                continue
+
             if ep.final_reward < min_reward:
                 continue
             if require_success and not ep.success:
                 continue
 
             if deduplicate:
-                # Hash task + action sequence
+                bench_id = str(meta.get("benchmark_task_id", ""))
+                # Extract RTL across steps to preserve architectural diversity
+                rtl_texts = []
+                for s in ep.steps:
+                    params = getattr(s, "action_params", {}) or {}
+                    if isinstance(params, dict):
+                        if "code" in params:
+                            rtl_texts.append(str(params["code"]))
+                        elif "current_rtl" in params:
+                            rtl_texts.append(str(params["current_rtl"]))
+                combined_rtl = "\n".join(rtl_texts)
+                norm_rtl = normalize_rtl_for_dedup(combined_rtl)
                 action_seq = "-".join(s.action for s in ep.steps)
-                h = hashlib.sha256(f"{ep.task}|{action_seq}".encode("utf-8")).hexdigest()
+                verif_res = f"succ:{ep.success}|rew:{round(ep.final_reward, 2)}"
+
+                # Multi-attribute hash prevents collapsing structurally distinct RTL solutions
+                h = hashlib.sha256(
+                    f"{bench_id}|{ep.task}|{norm_rtl}|{action_seq}|{verif_res}".encode("utf-8")
+                ).hexdigest()
                 if h in seen_hashes:
                     continue
                 seen_hashes.add(h)
@@ -104,7 +140,11 @@ class TrajectoryDatasetBuilder:
         episodes: list[Episode],
         min_reward: float = 0.7,
     ) -> list[dict[str, Any]]:
-        """Build SFT dataset from successful trajectory episodes."""
+        """Build SFT dataset from successful trajectory episodes.
+        
+        Strictly records authentic observable interaction structure (prompt, tool call,
+        observation, error, correction, reward) without synthetic post-hoc thinking traces.
+        """
         filtered = self.filter_trajectories(episodes, min_reward=min_reward, require_success=True)
         dataset = []
 
@@ -115,15 +155,25 @@ class TrajectoryDatasetBuilder:
                     f"Current State: {step.state_summary}\n"
                     f"What action should you take next?"
                 )
-                response = json.dumps({
-                    "thinking": f"Based on the hardware requirements, I should execute {step.action}.",
+                # Authentic response payload without fabricated thinking
+                resp_payload: dict[str, Any] = {
                     "action": step.action,
                     "params": step.action_params,
-                }, indent=2)
+                }
+                # Preserve authentic reasoning if genuinely recorded during rollout
+                step_meta = getattr(step, "metadata", {}) or {}
+                if "model_output" in step_meta and step_meta["model_output"]:
+                    resp_payload["model_output"] = step_meta["model_output"]
+                elif "thinking" in step_meta and step_meta["thinking"]:
+                    resp_payload["thinking"] = step_meta["thinking"]
+
+                response = json.dumps(resp_payload, indent=2)
 
                 dataset.append({
                     "instruction": instruction,
                     "response": response,
+                    "action": step.action,
+                    "observation": step.observation,
                     "reward": step.reward,
                     "episode_id": episode.episode_id,
                     "step_index": step.step_index,
@@ -158,15 +208,23 @@ class TrajectoryDatasetBuilder:
                         f"Error Observed: {curr.observation}\n"
                         f"How do you repair this failure?"
                     )
-                    response = json.dumps({
-                        "thinking": "Analyzing failure and proposing corrective action.",
+                    # Authentic repair action without post-hoc synthetic thinking
+                    resp_payload: dict[str, Any] = {
                         "action": nxt.action,
                         "params": nxt.action_params,
-                    }, indent=2)
+                    }
+                    nxt_meta = getattr(nxt, "metadata", {}) or {}
+                    if "model_output" in nxt_meta and nxt_meta["model_output"]:
+                        resp_payload["model_output"] = nxt_meta["model_output"]
+
+                    response = json.dumps(resp_payload, indent=2)
 
                     pairs.append({
                         "instruction": instruction,
                         "response": response,
+                        "failed_action": curr.action,
+                        "observed_error": curr.observation,
+                        "correction_action": nxt.action,
                         "episode_id": ep.episode_id,
                         "error_stage": curr.action,
                     })
@@ -181,6 +239,9 @@ class TrajectoryDatasetBuilder:
         """Build pairwise preference dataset (prompt, chosen, rejected) for DPO training."""
         task_groups: dict[str, list[Episode]] = {}
         for ep in episodes:
+            meta = getattr(ep, "metadata", {}) or {}
+            if meta.get("fallback_used") is True or getattr(ep, "fallback_used", False) is True:
+                continue
             key = ep.task.strip().lower()[:80]
             task_groups.setdefault(key, []).append(ep)
 
@@ -221,9 +282,7 @@ class TrajectoryDatasetBuilder:
     ) -> list[dict[str, Any]]:
         """Build prompt dataset for online/group-relative GRPO training.
         
-        Unlike pairwise DPO datasets, GRPO requires only prompt inputs with task specifications.
-        The model samples G candidate completions per prompt, which are evaluated by
-        HardwareRewardEvaluator against the genuine EDA pipeline to calculate group advantages.
+        Mandatory exact benchmark_task_id is attached to every single example.
         """
         import re
         from benchmarks.curriculum import BenchmarkCurriculum
@@ -259,6 +318,7 @@ class TrajectoryDatasetBuilder:
             user_prompt = task.get_public_spec()
             full_prompt = f"{system_prompt}\n\n{user_prompt}"
 
+            # benchmark_task_id is strictly mandatory
             dataset.append({
                 "prompt": full_prompt,
                 "benchmark_task_id": task.id,

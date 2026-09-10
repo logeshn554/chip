@@ -3,18 +3,13 @@ First Milestone Demonstration Script:
 Runs the autonomous self-evolving hardware design agent on:
 "Design an 8-bit signed MAC."
 
-Executes the complete flow:
-1. Receives user task: "Design an 8-bit signed MAC."
-2. Decides whether external web research is needed.
-3. Retrieves relevant memory & guidelines.
-4. Generates SystemVerilog RTL and saves mac.sv.
-5. Runs Verilator lint/syntax verification.
-6. Runs Cocotb functional verification.
-7. Inspects structured error feedback if failures occur, repairs RTL, and retries.
-8. Runs Yosys synthesis.
-9. Calculates grounded reward (R = compile + functional + synthesis + lint).
-10. Stores complete trajectory episode.
-11. Returns final RTL and evaluation metrics.
+Startup Flow:
+1. Load configuration
+2. Verify Ollama server
+3. Verify qwen3:4b exists
+4. Test one real generation
+5. Start HardwareAgent
+6. Run episode
 """
 
 import asyncio
@@ -22,6 +17,9 @@ import json
 import logging
 import os
 import sys
+import urllib.error
+import urllib.request
+import yaml
 
 # Ensure repository root is on PYTHONPATH
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -36,6 +34,62 @@ logging.basicConfig(
 logger = logging.getLogger("MilestoneRunner")
 
 
+def load_agent_config() -> dict:
+    """Step 1: Load configuration."""
+    config_path = os.path.join(os.path.dirname(__file__), "..", "configs", "agent.yaml")
+    if not os.path.exists(config_path):
+        config_path = "configs/agent.yaml"
+    with open(config_path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def verify_ollama_and_model(base_url: str, model_name: str) -> None:
+    """Steps 2 & 3: Verify Ollama server and verify qwen3:4b exists."""
+    url = f"{base_url.rstrip('/')}/api/tags"
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=10.0) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Ollama request failed: HTTP {e.code}. URL={url}, model={model_name}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Cannot connect to Ollama at {base_url}. Ensure Ollama is running.") from e
+
+    print("Ollama Server: PASS")
+
+    models = data.get("models", [])
+    installed_names = []
+    for m in models:
+        if isinstance(m, dict):
+            if "name" in m:
+                installed_names.append(m["name"])
+            if "model" in m:
+                installed_names.append(m["model"])
+
+    target = model_name.lower()
+    matched = any(
+        target == name.lower()
+        or name.lower().startswith(f"{target}:")
+        or f"{target}:latest" == name.lower()
+        or (":" not in target and name.lower().split(":")[0] == target)
+        for name in installed_names
+    )
+
+    if not matched:
+        raise RuntimeError(f"Qwen3-4B is not installed in Ollama. Run: ollama pull {model_name}")
+
+    print("Qwen3-4B: PASS")
+
+
+async def test_generation(client: OllamaQwenClient) -> None:
+    """Step 4: Test one real generation."""
+    prompt = "Ping: respond with PONG"
+    resp = await client.generate(prompt)
+    if not resp.text or not resp.text.strip():
+        raise RuntimeError("Test generation returned empty response.")
+    print("Test Generation: PASS")
+
+
 async def main():
     print("=" * 80)
     print("  SELF-EVOLVING HARDWARE DESIGN AGENT — FIRST MILESTONE")
@@ -43,28 +97,60 @@ async def main():
     print("  Target: result = (a * b) + acc")
     print("=" * 80)
 
-    # Initialize Qwen client (uses Ollama if available, with robust fallback)
-    llm = OllamaQwenClient(model="qwen2.5-coder:3b")
+    # 1. Load configuration
+    config = load_agent_config()
+    llm_cfg = config.get("llm", {})
+    model_name = llm_cfg.get("model_name", "qwen3:4b")
+    base_url = llm_cfg.get("ollama", {}).get("base_url", "http://localhost:11434")
 
-    # Initialize Agent
+    print(f"LLM Provider: Ollama")
+    print(f"LLM Model: {model_name}")
+    print(f"Ollama URL: {base_url}")
+
+    # 2. Verify Ollama server & 3. Verify qwen3:4b exists
+    verify_ollama_and_model(base_url, model_name)
+
+    # 4. Test one real generation
+    llm = OllamaQwenClient(
+        model=model_name,
+        base_url=base_url,
+        timeout=llm_cfg.get("timeout_seconds", 60.0),
+        temperature=llm_cfg.get("temperature", 0.2),
+        top_p=llm_cfg.get("top_p", 0.9),
+    )
+    await test_generation(llm)
+
+    # 5. Start HardwareAgent
     agent = HardwareAgent(llm=llm, work_dir="./rtl/generated")
 
+    # 6. Run episode
     task = "Design an 8-bit signed MAC. Mathematical target: result = (a * b) + acc. Synthesizable SystemVerilog, signed arithmetic, separate testbench, no vendor primitives."
 
-    print("\n[1/4] Starting Agent Episode...")
+    print("Starting Agent Episode...\n")
     result = await agent.run_episode(task)
 
-    print("\n[2/4] Agent Episode Finished!")
+    print("\nAgent Episode Finished!")
     print(f"  Episode ID:    {result['episode_id']}")
     print(f"  Trajectory ID: {result['trajectory_id']}")
     print(f"  Success:       {result['success']}")
     print(f"  Total Steps:   {result['total_steps']}")
     print(f"  Reward:        {result['reward']} / 8.0")
-    print("\n[3/4] Grounded Reward Breakdown:")
+    print("\nReward Breakdown:")
     for k, v in result["reward_breakdown"].items():
         print(f"    - {k}: {v}")
 
-    print("\n[4/4] Generated RTL Preview:")
+    # Check and print trajectory provenance proof
+    trajectories = agent.trajectory_store.list_trajectories()
+    matching = [t for t in trajectories if t.get("trajectory_id") == result["trajectory_id"]]
+    if matching:
+        latest = matching[-1]
+        print("\nTrajectory Provenance Proof:")
+        print(f"  provider      = {latest.get('provider')}")
+        print(f"  model         = {latest.get('model')}")
+        print(f"  fallback_used = {latest.get('fallback_used')}")
+        print(f"  rtl_source    = {latest.get('rtl_source')}")
+
+    print("\nGenerated RTL Preview:")
     print("-" * 60)
     lines = result["final_rtl"].splitlines()
     for line in lines[:30]:

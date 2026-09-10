@@ -36,6 +36,8 @@ class BenchmarkTask:
     public_tests: list[dict[str, Any]] = field(default_factory=list)
     held_out_tests: list[dict[str, Any]] = field(default_factory=list)
     formal_properties: str = ""  # Separate SystemVerilog formal property specification
+    target_cells: Optional[float] = None
+    target_timing_ns: Optional[float] = None
 
     @property
     def task_id(self) -> str:
@@ -502,6 +504,11 @@ endmodule
         ))
 
     def _register(self, task: BenchmarkTask):
+        if task.target_cells is None:
+            defaults = {1: 10.0, 2: 50.0, 3: 150.0, 4: 400.0, 5: 300.0, 6: 350.0, 7: 500.0}
+            task.target_cells = defaults.get(task.level, 100.0)
+        if task.target_timing_ns is None:
+            task.target_timing_ns = 5.0
         self._tasks[task.id] = task
 
 

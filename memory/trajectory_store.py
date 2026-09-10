@@ -51,6 +51,10 @@ class TrajectoryRecord:
     trajectory_id: str = ""
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     metadata: dict[str, Any] = field(default_factory=dict)
+    provider: str = "ollama"
+    model: str = "qwen3:4b"
+    fallback_used: bool = False
+    rtl_source: str = "qwen"
 
     def __post_init__(self):
         if not self.trajectory_id:
@@ -65,6 +69,11 @@ class TrajectoryRecord:
             "steps": self.steps,
             "reward": round(self.reward, 4),
             "timestamp": self.timestamp,
+            "provider": self.provider,
+            "model": self.model,
+            "fallback_used": self.fallback_used,
+            "rtl_source": self.rtl_source,
+            "metadata": self.metadata,
         }
 
 
@@ -91,11 +100,16 @@ class TrajectoryStore:
             elif isinstance(s, dict):
                 cleaned_steps.append(s)
 
+        meta = metadata or {}
         record = TrajectoryRecord(
             task=task,
             steps=cleaned_steps,
             reward=reward,
-            metadata=metadata or {},
+            metadata=meta,
+            provider=meta.get("provider", "ollama"),
+            model=meta.get("model", "qwen3:4b"),
+            fallback_used=meta.get("fallback_used", False),
+            rtl_source=meta.get("rtl_source", "qwen"),
         )
 
         with open(self.log_file, "a", encoding="utf-8") as f:

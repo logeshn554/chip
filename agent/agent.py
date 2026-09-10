@@ -24,6 +24,7 @@ import sys
 from typing import Any, Optional
 
 from agent.state import AgentState
+from agent.schemas import Episode
 from agent.prompts import SYSTEM_PROMPT, ERROR_ANALYSIS_PROMPT
 from agent.planner import HardwarePlanner
 from llm.interface import LLMInterface
@@ -199,6 +200,10 @@ class HardwareAgent:
 
     async def run_episode(self, task: str) -> dict[str, Any]:
         """Execute a complete autonomous hardware design episode."""
+        # Verify model availability
+        if hasattr(self.llm, "verify_model_installed"):
+            self.llm.verify_model_installed()
+
         state = AgentState(task=task)
         self._log_observability("task_started", {"task": task, "episode_id": state.episode_id})
 
@@ -218,11 +223,21 @@ class HardwareAgent:
                 state,
             )
 
-        # Phase 2: Agent Reasoning & Action Loop
+        # Phase 2: Agent Reasoning & Action Loop with Experience Injection
         compile_ok = False
         func_ok = False
         synth_ok = False
         lint_ok = False
+
+        # Retrieve relevant past debugging lessons and reference fixes for this task
+        past_experiences = self.experience_store.retrieve_experiences_for_task(task=task, n_results=2)
+        if past_experiences:
+            for exp in past_experiences:
+                corr = exp.get("correction", "")
+                err = exp.get("error", "")
+                cat = exp.get("error_category", "GENERAL")
+                if corr:
+                    state.relevant_memory.append(f"[Past Debugging Lesson ({cat})]: Error '{err[:60]}' was fixed by: {corr[:120]}")
 
         while not state.is_finished and state.iteration < state.max_iterations:
             # Construct bounded working context for Qwen3-4B
@@ -297,13 +312,36 @@ class HardwareAgent:
         state.current_reward = final_reward_res.total_reward
 
         # Record trajectory
+        traj_meta = {
+            "compile": compile_ok,
+            "func": func_ok,
+            "synth": synth_ok,
+            "provider": getattr(self.llm, "backend", "ollama"),
+            "model": getattr(self.llm, "model", getattr(self.llm, "model_name", "qwen3:4b")),
+            "fallback_used": bool(getattr(self.llm, "mock_mode", False) or os.environ.get("LLM_PROVIDER") == "mock"),
+            "rtl_source": "qwen",
+        }
         traj_id = self.trajectory_store.save_trajectory(
             task=task,
             steps=state.trajectory_steps,
             reward=state.current_reward,
-            metadata={"compile": compile_ok, "func": func_ok, "synth": synth_ok},
+            metadata=traj_meta,
         )
-        self._log_observability("trajectory_saved", {"trajectory_id": traj_id, "reward": state.current_reward})
+        self._log_observability("trajectory_saved", {"trajectory_id": traj_id, "reward": state.current_reward, **traj_meta})
+
+        # WebRL-Style First-Class Failure Experience Indexing
+        try:
+            ep_obj = Episode(
+                episode_id=state.episode_id,
+                task=task,
+                steps=state.trajectory_steps,
+                final_reward=state.current_reward,
+                success=bool(compile_ok and func_ok and synth_ok),
+                metadata=traj_meta,
+            )
+            self.experience_store.record_episode_experience(ep_obj)
+        except Exception as e:
+            logger.debug(f"Could not record episode experience: {e}")
 
         return {
             "episode_id": state.episode_id,

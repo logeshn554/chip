@@ -108,6 +108,7 @@ async def _run_agent(task: str, config: dict, prompts: dict):
 
     # Initialize components
     qwen = QwenClient(config.get("llm", {}))
+    qwen.verify_model_installed()
     memory = MemorySystem(config.get("memory", {}))
     trajectory_store = TrajectoryStore(config.get("memory", {}).get("trajectory", {}))
     web_searcher = WebSearcher(config.get("web", {}))

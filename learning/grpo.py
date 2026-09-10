@@ -114,6 +114,8 @@ class HardwareRewardEvaluator:
         formal_properties: Optional[str] = None,
         benchmark_task_id: Optional[str] = None,
         max_concurrency: int = 4,
+        evaluation_mode: str = "research_fast",
+        require_exact_task: bool = False,
     ):
         self.default_top_module = top_module or "mac"
         self.default_test_file = test_file or "tests/mac/test_mac.py"
@@ -125,6 +127,8 @@ class HardwareRewardEvaluator:
         self.default_formal_properties = formal_properties
         self.default_benchmark_task_id = benchmark_task_id
         self.max_concurrency = max_concurrency
+        self.evaluation_mode = evaluation_mode
+        self.require_exact_task = require_exact_task
 
         os.makedirs(work_dir, exist_ok=True)
 
@@ -140,13 +144,22 @@ class HardwareRewardEvaluator:
         prompt: Optional[Any] = None,
         code: Optional[Any] = None,
         completion: Optional[Any] = None,
+        require_exact: Optional[bool] = None,
     ) -> Optional[Any]:
-        """Dynamically resolve the benchmark task configuration from task_id, prompt, or RTL code."""
+        """Dynamically resolve the benchmark task configuration.
+        
+        When require_exact is True (recommended for training), only exact match on task_id
+        is accepted. Fuzzy regex matching is disabled to prevent evaluating against the wrong benchmark.
+        """
         try:
             from benchmarks.curriculum import BenchmarkCurriculum
             curriculum = BenchmarkCurriculum()
         except Exception:
             return None
+
+        exact = self.require_exact_task if require_exact is None else require_exact
+        if exact:
+            return curriculum.get_task(task_id) if task_id else None
 
         prompt_str = normalize_completion_text(prompt) if prompt is not None else ""
         code_text = normalize_completion_text(code or completion) if (code or completion) is not None else ""
@@ -159,14 +172,14 @@ class HardwareRewardEvaluator:
 
         # 2. Extract benchmark ID from prompt (e.g. "[L1_NOT_GATE", "L3_MAC_8BIT_SIGNED", "L2_ALU_4BIT")
         if prompt:
-            id_match = re.search(r"\b(L[1-7]_[A-Z0-9_]+)\b", prompt)
+            id_match = re.search(r"\b(L[1-7]_[A-Z0-9_]+)\b", prompt_str)
             if id_match:
                 t = curriculum.get_task(id_match.group(1))
                 if t:
                     return t
 
             # Match by module name in prompt
-            mod_match = re.search(r"Module Name:\s*([a-zA-Z0-9_]+)", prompt)
+            mod_match = re.search(r"Module Name:\s*([a-zA-Z0-9_]+)", prompt_str)
             if mod_match:
                 target_m = mod_match.group(1).lower()
                 for task in curriculum._tasks.values():
@@ -175,7 +188,7 @@ class HardwareRewardEvaluator:
 
             # Match any task by ID or top module keyword in prompt
             for task in curriculum._tasks.values():
-                if task.id in prompt or task.top_module.lower() in prompt.lower():
+                if task.id in prompt_str or task.top_module.lower() in prompt_str.lower():
                     return task
 
         # 3. Extract module name from candidate RTL code
@@ -249,6 +262,16 @@ class HardwareRewardEvaluator:
         # Resolve benchmark task dynamically (mixed curriculum support)
         task_obj = self.resolve_benchmark_task(task_id=benchmark_task_id, prompt=prompt_str, code=code)
 
+        if self.require_exact_task and not task_obj:
+            return {
+                "reward": 0.0,
+                "compile_pass": False,
+                "functional_pass": False,
+                "error": f"Mandatory benchmark_task_id '{benchmark_task_id}' could not be resolved in exact mode.",
+                "task_id": benchmark_task_id,
+                "top_module": self.default_top_module,
+            }
+
         top_module = getattr(task_obj, "top_module", self.default_top_module)
         formal_properties = getattr(task_obj, "formal_properties", self.default_formal_properties)
         test_file = self.default_test_file
@@ -286,12 +309,20 @@ class HardwareRewardEvaluator:
         passed_tests = func_res.get("tests_passed", 0)
         pass_rate = (passed_tests / total_tests) if total_tests > 0 else (1.0 if func_res.get("status") == "passed" else 0.0)
 
-        # Stage 3: Logic Synthesis (Yosys)
+        # Stage 3: Logic Synthesis (Yosys) - strictly reject heuristic metrics during training
         area: Optional[float] = None
         if self.enable_synthesis:
-            synth_res = await self.yosys.synthesize(rtl_path, top_module=top_module)
-            if synth_res.get("status") == "passed":
-                area = float(synth_res.get("cells", 0) or synth_res.get("estimated_area", 0) or 0)
+            synth_res = await self.yosys.synthesize(
+                rtl_path,
+                top_module=top_module,
+                allow_heuristic_fallback=False,
+            )
+            # NEVER use heuristic cell/area estimates for training reward
+            if synth_res.get("status") == "passed" and synth_res.get("metric_type") == "actual":
+                area = float(synth_res.get("cells", 0) or 0)
+            elif synth_res.get("status") == "failed" and synth_res.get("metric_type") == "actual":
+                # Real synthesis failed on candidate
+                area = -1.0
 
         # Stage 4: Formal Verification (SymbiYosys) using task's external benchmark properties
         formal_status = "SKIPPED"
@@ -304,12 +335,17 @@ class HardwareRewardEvaluator:
             formal_status = formal_res.get("status", "SKIPPED")
 
         # Grounded Reward Calculation with Weight Re-normalization
+        effective_area_target = getattr(task_obj, "target_cells", None) or self.target_cells
+        effective_timing_target = getattr(task_obj, "target_timing_ns", None) or self.target_timing_ns
+
         reward_result = self.reward_engine.compute_modular_reward(
             compile_success=compile_pass,
             test_pass_rate=pass_rate,
             formal_status=formal_status,
             area=area,
-            area_target=self.target_cells,
+            area_target=effective_area_target,
+            timing_target=effective_timing_target,
+            evaluation_mode=self.evaluation_mode,
         )
 
         return {
@@ -430,18 +466,24 @@ class GRPOTrainer:
 
     def __init__(self, config: dict[str, Any] | None = None):
         config = config or {}
+        self.config = config
         self.model_name = config.get("model_name", "Qwen/Qwen3-4B")
         self.group_size = config.get("group_size", 4)
         self.learning_rate = config.get("learning_rate", 1e-5)
         self.kl_coeff = config.get("kl_coeff", 0.1)
+        self.temperature = config.get("temperature", 0.6)
+        self.top_p = config.get("top_p", 0.95)
+        self.top_k = config.get("top_k", 20)
         self.output_dir = config.get("output_dir", "./models/grpo")
 
-        # Hardware evaluator
+        # Hardware evaluator with training-hardened settings
         self.evaluator = HardwareRewardEvaluator(
             top_module=config.get("top_module"),
             test_file=config.get("test_file"),
             target_cells=config.get("target_cells", 500.0),
             max_concurrency=config.get("max_concurrency", 4),
+            evaluation_mode=config.get("evaluation_mode", "research_fast"),
+            require_exact_task=config.get("require_exact_task", True),
         )
 
     def compute_step_advantages(
@@ -464,7 +506,7 @@ class GRPOTrainer:
 
         Args:
             dataset_path: Path to the prompt dataset (JSONL with 'prompt' column
-                          and optional 'benchmark_task_id' column)
+                          and mandatory 'benchmark_task_id' column)
 
         Returns:
             Training results dict
@@ -475,6 +517,7 @@ class GRPOTrainer:
         logger.info(f"Model: {self.model_name}")
         logger.info(f"Group size: {self.group_size}")
         logger.info(f"KL coefficient: {self.kl_coeff}")
+        logger.info(f"Qwen Generation: temp={self.temperature}, top_p={self.top_p}, top_k={self.top_k}")
 
         try:
             return self._run_training(dataset_path)
@@ -492,16 +535,32 @@ class GRPOTrainer:
     def _run_training(self, dataset_path: str) -> dict[str, Any]:
         """Execute GRPO training with real hardware reward evaluation and modern TRL API."""
         import inspect
+        import torch
         from datasets import load_dataset
         from peft import LoraConfig, TaskType
         from transformers import AutoModelForCausalLM, AutoTokenizer
         from trl import GRPOConfig, GRPOTrainer as TRLGRPOTrainer
 
         tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+        
+        # Low-memory QLoRA / 4-bit config for practical local execution
+        model_kwargs: dict[str, Any] = {"device_map": "auto"}
+        if self.config.get("load_in_4bit"):
+            try:
+                from transformers import BitsAndBytesConfig
+                model_kwargs["quantization_config"] = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_compute_dtype=torch.bfloat16,
+                    bnb_4bit_quant_type="nf4",
+                )
+            except Exception:
+                model_kwargs["torch_dtype"] = "auto"
+        else:
+            model_kwargs["torch_dtype"] = "auto"
+
         model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
-            torch_dtype="auto",
-            device_map="auto",
+            **model_kwargs,
         )
 
         lora_config = LoraConfig(
@@ -513,15 +572,20 @@ class GRPOTrainer:
 
         dataset = load_dataset("json", data_files=dataset_path, split="train")
 
-        training_config = GRPOConfig(
-            output_dir=self.output_dir,
-            num_train_epochs=1,
-            per_device_train_batch_size=2,
-            learning_rate=self.learning_rate,
-            logging_steps=10,
-            kl_coef=self.kl_coeff,
-            num_generations=self.group_size,
-        )
+        grpo_args: dict[str, Any] = {
+            "output_dir": self.output_dir,
+            "num_train_epochs": 1,
+            "per_device_train_batch_size": 2,
+            "learning_rate": self.learning_rate,
+            "logging_steps": 10,
+            "kl_coef": self.kl_coeff,
+            "num_generations": self.group_size,
+        }
+        sig_grpo = inspect.signature(GRPOConfig.__init__)
+        if "temperature" in sig_grpo.parameters:
+            grpo_args["temperature"] = self.temperature
+
+        training_config = GRPOConfig(**grpo_args)
 
         # Genuine hardware evaluation reward function with task-aware routing
         def hardware_reward_fn(
