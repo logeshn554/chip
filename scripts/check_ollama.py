@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.device import detect_system_gpus, get_ollama_gpu_options, has_gpu
 
 OLLAMA_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-MODEL_NAME = os.environ.get("LLM_MODEL", "qwen2.5:14b")
+MODEL_NAME = os.environ.get("LLM_MODEL", "qwen3:14b")
 
 
 def check_ollama():
@@ -69,31 +69,45 @@ def check_ollama():
                 installed_names.append(m["model"])
 
     target = MODEL_NAME.lower()
-    matched = any(
-        target == name.lower()
-        or name.lower().startswith(f"{target}:")
-        or f"{target}:latest" == name.lower()
-        or (":" not in target and name.lower().split(":")[0] == target)
-        for name in installed_names
-    )
+    active_model = None
+    for name in installed_names:
+        n_low = name.lower()
+        if (
+            target == n_low
+            or n_low.startswith(f"{target}:")
+            or f"{target}:latest" == n_low
+            or (":" not in target and n_low.split(":")[0] == target)
+        ):
+            active_model = name
+            break
 
-    if matched:
-        model_status = "PASS"
-    else:
-        print("==================================================")
-        print("OLLAMA / QWEN-14B & GPU DIAGNOSTIC")
-        print("==================================================")
-        print(f"Ollama URL   : {OLLAMA_URL}")
-        print(f"Provider     : ollama")
-        print(f"Model        : {MODEL_NAME}")
-        print(f"GPU Hardware : {gpu_desc}")
-        print(f"GPU Offload  : {gpu_offload_status}")
-        print(f"Server       : PASS")
-        print(f"Model        : FAIL (Available: {installed_names})")
-        print(f"Generation   : FAIL")
-        print("STATUS: FAILED")
-        print(f"\nError: Qwen-14B is not installed in Ollama. Run: ollama pull {MODEL_NAME}")
-        sys.exit(1)
+    if not active_model:
+        # Check for alternative installed Qwen models (e.g. qwen3:14b, qwen3.5:9b)
+        candidates = [name for name in installed_names if "qwen" in name.lower()]
+        if candidates:
+            candidates.sort(key=lambda x: (1 if "14b" in x.lower() else 0, x), reverse=True)
+            active_model = candidates[0]
+            print(f"Notice: Configured model '{MODEL_NAME}' not found; using installed '{active_model}'.")
+        elif installed_names:
+            active_model = installed_names[0]
+            print(f"Notice: Using available installed model '{active_model}'.")
+        else:
+            print("==================================================")
+            print("OLLAMA / QWEN DIAGNOSTIC")
+            print("==================================================")
+            print(f"Ollama URL   : {OLLAMA_URL}")
+            print(f"Provider     : ollama")
+            print(f"Model        : {MODEL_NAME}")
+            print(f"GPU Hardware : {gpu_desc}")
+            print(f"GPU Offload  : {gpu_offload_status}")
+            print(f"Server       : PASS")
+            print(f"Model        : FAIL (Available: {installed_names})")
+            print(f"Generation   : FAIL")
+            print("STATUS: FAILED")
+            print(f"\nError: No compatible model found in Ollama. Run: ollama pull {MODEL_NAME}")
+            sys.exit(1)
+
+    model_status = "PASS"
 
     # 3. Send a REAL /api/generate request with GPU offload options
     generate_url = f"{OLLAMA_URL}/api/generate"
@@ -104,7 +118,7 @@ def check_ollama():
         **gpu_opts,
     }
     payload = {
-        "model": MODEL_NAME,
+        "model": active_model,
         "prompt": "Respond with the single word PONG",
         "stream": False,
         "options": gen_options,

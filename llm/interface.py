@@ -10,15 +10,12 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-DEFAULT_MODEL_NAME: str = os.environ.get("LLM_MODEL", "qwen2.5:14b")
+DEFAULT_MODEL_NAME: str = os.environ.get("LLM_MODEL", "qwen3:14b")
 
 
 def get_default_model(configured_name: Optional[str] = None) -> str:
-    """Return canonical LLM model name, normalized across aliases."""
-    raw = configured_name or os.environ.get("LLM_MODEL", "qwen2.5:14b")
-    raw_clean = raw.lower().replace("-", "").replace("_", "")
-    if "14b" in raw_clean:
-        return "qwen2.5:14b"
+    """Return canonical LLM model name, normalized across aliases without forcing legacy versions."""
+    raw = (configured_name or os.environ.get("LLM_MODEL") or DEFAULT_MODEL_NAME).strip()
     return raw
 
 

@@ -781,7 +781,12 @@ class PhysicalConstraintEvolutionLoop:
 
                 # 3. Score fitness towards meeting constraints
                 pass_count = sum(1 for v in check_res.checks.values() if v)
-                fitness = pass_count * 10.0 + (cand.pipeline_depth * 1.5) - (check_res.projections.total_device_power_w * 2.0)
+                fitness = (
+                    pass_count * 20.0
+                    + min(check_res.projections.achievable_tokens_per_sec, 25.0) * 1.5
+                    - (check_res.projections.total_device_power_w * 2.0)
+                    + (cand.pipeline_depth * 0.5)
+                )
                 evaluated.append((cand, check_res, fitness))
 
             # Sort by fitness descending
@@ -844,8 +849,8 @@ class PhysicalConstraintEvolutionLoop:
 
             # 2. Complementary exploratory mutations
             child2 = self.search_engine.mutate_candidate(best_cand, "quantized_int4_arithmetic")
-            child3 = self.search_engine.mutate_candidate(best_cand, "deeper_pipeline")
-            child4 = self.search_engine.mutate_candidate(best_cand, "streaming_dataflow")
+            child3 = self.search_engine.mutate_candidate(best_cand, "local_sram")
+            child4 = self.search_engine.mutate_candidate(best_cand, "deeper_pipeline")
             next_generation_candidates.extend([child2, child3, child4])
 
             candidates = next_generation_candidates[:self.candidates_per_generation]

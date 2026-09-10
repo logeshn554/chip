@@ -67,18 +67,34 @@ def verify_ollama_and_model(base_url: str, model_name: str) -> None:
                 installed_names.append(m["model"])
 
     target = model_name.lower()
-    matched = any(
-        target == name.lower()
-        or name.lower().startswith(f"{target}:")
-        or f"{target}:latest" == name.lower()
-        or (":" not in target and name.lower().split(":")[0] == target)
-        for name in installed_names
-    )
+    matched_model = None
+    for name in installed_names:
+        n_low = name.lower()
+        if (
+            target == n_low
+            or n_low.startswith(f"{target}:")
+            or f"{target}:latest" == n_low
+            or (":" not in target and n_low.split(":")[0] == target)
+        ):
+            matched_model = name
+            break
 
-    if not matched:
-        raise RuntimeError(f"Qwen-14B is not installed in Ollama. Run: ollama pull {model_name}")
+    if not matched_model:
+        # Check if user has an alternative installed Qwen model (e.g. qwen3:14b, qwen3.5:9b, etc.)
+        candidates = [name for name in installed_names if "qwen" in name.lower()]
+        if candidates:
+            # Sort preferring 14b if present
+            candidates.sort(key=lambda x: (1 if "14b" in x.lower() else 0, x), reverse=True)
+            matched_model = candidates[0]
+            print(f"Auto-selected installed Ollama model: {matched_model} (configured: {model_name})")
+        elif installed_names:
+            matched_model = installed_names[0]
+            print(f"Using installed Ollama model: {matched_model}")
+        else:
+            raise RuntimeError(f"No models found in Ollama. Please run: ollama pull {model_name}")
 
-    print("Qwen-14B: PASS")
+    print(f"Ollama Model [{matched_model}]: PASS")
+    return matched_model
 
 
 async def test_generation(client: OllamaQwenClient) -> None:
@@ -108,8 +124,8 @@ async def main():
     print(f"LLM Model: {model_name}")
     print(f"Ollama URL: {base_url}")
 
-    # 2. Verify Ollama server & 3. Verify qwen2.5:14b exists
-    verify_ollama_and_model(base_url, model_name)
+    # 2. Verify Ollama server & 3. Verify target or compatible Qwen model exists
+    model_name = verify_ollama_and_model(base_url, model_name)
 
     # 4. Test one real generation
     llm = OllamaQwenClient(

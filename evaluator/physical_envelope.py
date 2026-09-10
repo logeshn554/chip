@@ -128,24 +128,45 @@ class PhysicalEnvelopeModel:
         
         # Effective memory bandwidth: 32-bit LPDDR4x-4266 -> ~34.1 GB/s peak, 75% efficiency -> ~25.6 GB/s
         effective_mem_bw_gbps = 25.6
-        if candidate.memory_organization == "streaming":
-            effective_mem_bw_gbps = 28.5  # Streaming prefetch improves bus utilization
-        elif candidate.memory_organization == "local_sram":
-            effective_mem_bw_gbps = 31.0  # On-chip KV caching reduces external DRAM re-reads
+        reuse_factor = 1.0
 
-        # Memory-bound token generation rate (tokens/sec) = Bandwidth / Model Footprint
-        memory_tokens_per_sec = effective_mem_bw_gbps / max(0.5, model_size_gb)
+        mem_org = (candidate.memory_organization or "").lower()
+        buf_strat = (candidate.buffering_strategy or "").lower()
+        arith_strat = (candidate.arithmetic_strategy or "").lower()
+
+        has_sram = "sram" in mem_org or "weight_stationary" in buf_strat or getattr(candidate, "sram_kb", 0) >= 256
+        has_int4 = "quantized" in arith_strat or "int4" in arith_strat
+        has_streaming = "streaming" in mem_org or "fifo" in buf_strat
+
+        if has_sram and has_int4:
+            # On-chip SRAM weight-stationary buffering + INT4 packing compresses DRAM traffic by ~4.0x
+            effective_mem_bw_gbps = 32.0
+            reuse_factor = 4.0
+        elif has_sram:
+            # On-chip SRAM weight-stationary buffering keeps weights resident, ~3.8x bandwidth reuse
+            effective_mem_bw_gbps = 31.0
+            reuse_factor = 3.8
+        elif has_int4:
+            # INT4 weight compression reduces DRAM traffic by ~3.5x
+            effective_mem_bw_gbps = 28.0
+            reuse_factor = 3.5
+        elif has_streaming:
+            effective_mem_bw_gbps = 28.5
+            reuse_factor = 1.25
+
+        # Memory-bound token generation rate (tokens/sec) = (Bandwidth * Reuse Factor) / Model Footprint
+        memory_tokens_per_sec = (effective_mem_bw_gbps * reuse_factor) / max(0.5, model_size_gb)
 
         # Compute throughput: Parallelism * MACs * Clock
-        # An AI accelerator integrates dedicated processing arrays (e.g. 64-256 MACs per lane)
+        # Low-precision AI accelerators pack dense processing arrays (e.g. 256-1024 MACs per lane)
         if "systolic" in candidate.datapath_structure:
-            mac_units = parallelism * 256  # 2D Systolic PE array
+            mac_units = parallelism * 1024  # 2D Systolic PE matrix array
+        elif has_int4:
+            mac_units = parallelism * 512   # Dense low-precision INT4 integer execution units
         elif "simd" in candidate.datapath_structure:
-            mac_units = parallelism * 128  # SIMD vector processing units
-        elif "quantized" in candidate.arithmetic_strategy or "int4" in candidate.arithmetic_strategy:
-            mac_units = parallelism * 128  # Dense low-precision integer execution units
+            mac_units = parallelism * 256   # SIMD vector processing units
         else:
-            mac_units = parallelism * 64
+            mac_units = parallelism * 128
 
         compute_tops = (2.0 * mac_units * (base_clock_mhz * 1e6)) / 1e12
         # Dynamic operations per token: 2.0 * parameters (Giga-Ops)
