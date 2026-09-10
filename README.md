@@ -270,23 +270,87 @@ python main.py status
 ```bash
 python -m pytest tests/ -v
 ```
-*(Runs 164 test cases covering JSON parsing, physical envelope modeling, error recovery, security path restriction, formal verification, Scraping filters, reward math, vector wrappers, active Gymnasium environment, curriculum benchmark resolution, and concurrent GRPO batching).*
+*(Runs 181 test cases covering open-ended architecture search, 16 exploration operations, query-driven component search, provenance verification, physical feasibility, custom chip mode escalation, Pareto frontier tracking, hypothesis validation, security path restriction, formal verification, reward math, and concurrent GRPO batching).*
 
-### Step 4: Run Reproducible Architecture Evolution Pilot
+### Step 4: Run Open-Ended Architecture Search & Custom Chip Evolution Acceptance Test
+```bash
+python scripts/run_open_ended_evolution.py --mode DEVELOPMENT
+```
+*(Executes the exact Section 31 end-to-end milestone: Target Spec -> Arch A fails power -> Arch B fails size -> Arch C commercial component search -> Escalation to Custom Chip Mode -> Arch C custom fails area -> Arch D custom passes EDA & physical feasibility -> Final Candidate identified with full genealogy tree and Pareto frontier).*
+
+### Step 5: Run Reproducible Architecture Evolution Pilot
 ```bash
 python scripts/run_evolution_pilot.py
 ```
 *(Executes multi-generation evolution on `L3_MAC_8BIT_SIGNED`, evaluates held-out benchmark before and after, performs promotion and rollback, and saves `pilot_report.json` and `genealogy.json`).*
 
-### Step 5: Run Physical Envelope Constraint Satisfaction Evolution
+### Step 6: Run Physical Envelope Constraint Satisfaction Evolution
 ```bash
 python scripts/run_physical_envelope_evolution.py
 ```
 *(Runs open-ended multi-generation architecture search against the 100x30x12mm, 5W, 85°C, 8GB RAM, USB-C, Qwen3-4B-INT4 >= 12-15 tok/s physical envelope until all constraints pass).*
 
-### Step 6: Run End-to-End Autonomous Agent Milestone
+### Step 7: Run End-to-End Autonomous Agent Milestone
 ```bash
 python scripts/run_mac_milestone.py
+```
+
+---
+
+## 10. Open-Ended Architecture Search & Custom Chip Design Pipeline
+
+```
+                               TargetSpecification
+                                       │
+                                       ▼
+                     [LEVEL 2: Architecture Hypothesis Generation]
+                       (16 Operators: GENERATE, MUTATE, COMBINE,
+                        CHANGE_PRECISION, DESIGN_CUSTOM_CHIP, ...)
+                                       │
+                                       ▼
+                   [LEVEL 3: Query-Driven Component Research]
+                      search(query) ──> Fetch ──> Extract Spec 
+                      Rank Sources (Tier 1: 0.95, Tier 2: 0.80, Tier 3: 0.50)
+                      Preserve Provenance (No Hallucinated Metrics)
+                                       │
+                                       ▼
+                   [LEVEL 4 & 9: Physical Feasibility Engine]
+                      Assembly Footprint, Double-Sided PCB Area,
+                      Volume, Power Budgets, Junction Temperature
+                                       │
+                       Does commercial assembly fit?
+                        ├── YES ──> [LEVEL 10: Pareto Frontier Evaluation]
+                        │
+                        └── NO (e.g. Size/Power wall or no COTS accelerator)
+                                       │
+                                       ▼
+                         [MANDATORY: CUSTOM CHIP MODE]
+                                       │
+                                       ▼
+                     [LEVEL 5: Custom Silicon SoC Generation]
+                     - RISC-V RV32I Lite Control Core
+                     - Systolic Transformer Accelerator Block
+                     - Banked Embedded SRAM & Weight Stationary
+                     - Native USB-C Controller & DMA Engine
+                                       │
+                                       ▼
+                     [LEVEL 6, 7, 8: RTL Verification & EDA]
+                     - Verilator Compilation
+                     - Cocotb Functional Vectors
+                     - SymbiYosys Formal Bounds
+                     - Yosys Logic Synthesis & PPA
+                                       │
+                        Does custom chip pass PPA/Area?
+                        ├── NO  ──> Mark FAILED_HYPOTHESIS
+                        │           Analyze root cause (e.g. Area too high)
+                        │           Mutate chip architecture:
+                        │           (INT4 Quantization + Shared MAC + Banked SRAM)
+                        │           Generate chip_generation_002, 003...
+                        │
+                        └── YES ──> Mark VALIDATED_ARCHITECTURE
+                                    Register in Genealogy Lineage Tree
+                                    Update 7-Objective Pareto Frontier
+                                    PROMOTED AS FINAL CANDIDATE
 ```
 
 ---

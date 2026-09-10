@@ -7,11 +7,12 @@ and tool layers are defined here for consistency.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import time
+from typing import Any, Optional
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
 
 
 # ── Actions ──────────────────────────────────────────────────────────
@@ -286,6 +287,15 @@ class HardwareArchitectureCandidate:
     architecture_id: str
     task_id: str
     parent_architecture_id: Optional[str] = None
+    generation: int = 0
+    mutation_type: str = "initial"
+    specification_version: str = "1.0"
+    architecture_description: str = ""
+    components: list[Any] = field(default_factory=list)  # list[ComponentEvidence]
+    interfaces: list[str] = field(default_factory=list)
+    memory_hierarchy: dict[str, Any] = field(default_factory=dict)
+    compute_units: dict[str, Any] = field(default_factory=dict)
+    accelerator_structure: dict[str, Any] = field(default_factory=dict)
     datapath_structure: str = "direct"
     pipeline_depth: int = 1
     parallelism: int = 1
@@ -296,11 +306,33 @@ class HardwareArchitectureCandidate:
     rtl_implementation: str = ""
     estimated_resource_requirements: dict[str, Any] = field(default_factory=dict)
     actual_synthesis_metrics: dict[str, Any] = field(default_factory=dict)
+    estimated_constraints: dict[str, Any] = field(default_factory=dict)
+    measured_constraints: dict[str, Any] = field(default_factory=dict)
     verification_status: str = "unverified"  # "unverified", "passed", "failed"
     reward: float = 0.0
-    generation: int = 0
     trajectory_id: Optional[str] = None
+    is_hypothesis: bool = True
+    validation_status: str = "UNVERIFIED"  # "UNVERIFIED", "VALIDATED_ARCHITECTURE", "FAILED_HYPOTHESIS"
+    custom_chip: bool = False
+    chip_generation: int = 0
+    rejection_reasons: list[str] = field(default_factory=list)
+    constraint_states: dict[str, str] = field(default_factory=dict)
+    pareto_metrics: dict[str, float] = field(default_factory=dict)
+    verification_level: str = "SIMULATION_VALID"
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def datapath(self) -> str:
+        return self.datapath_structure
+
+    @property
+    def rejection_reason(self) -> str:
+        return "; ".join(self.rejection_reasons) if self.rejection_reasons else ""
+
+    @rejection_reason.setter
+    def rejection_reason(self, val: str) -> None:
+        if val and val not in self.rejection_reasons:
+            self.rejection_reasons.append(val)
 
 
 # ── Trajectory ───────────────────────────────────────────────────────
@@ -458,4 +490,137 @@ class ConstraintCheckResult:
     recommendations: list[str] = field(default_factory=list)
     projections: PhysicalProjectionMetrics = field(default_factory=PhysicalProjectionMetrics)
     envelope_name: str = ""
+
+
+# ── Explicit Constraint States & Feasibility Labels ───────────────────
+
+class ConstraintState(str, Enum):
+    """Explicit evaluation status for every hardware and physical constraint."""
+    PASS = "PASS"
+    FAIL = "FAIL"
+    UNKNOWN = "UNKNOWN"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+
+
+class FeasibilityLabel(str, Enum):
+    """Engineering label for component and physical fit feasibility."""
+    FEASIBLE_ESTIMATE = "FEASIBLE_ESTIMATE"
+    INFEASIBLE_ESTIMATE = "INFEASIBLE_ESTIMATE"
+    UNKNOWN = "UNKNOWN"
+
+
+class VerificationLevel(str, Enum):
+    """Evidence tier for hardware architecture claims."""
+    SIMULATION_VALID = "SIMULATION_VALID"
+    SYNTHESIS_VALID = "SYNTHESIS_VALID"
+    PHYSICALLY_ESTIMATED = "PHYSICALLY_ESTIMATED"
+    PHYSICALLY_VERIFIED = "PHYSICALLY_VERIFIED"
+    REAL_WORLD_COMPONENT_VERIFIED = "REAL_WORLD_COMPONENT_VERIFIED"
+    SILICON_VERIFIED = "SILICON_VERIFIED"
+
+
+# ── Real-World Component Evidence ────────────────────────────────────
+
+@dataclass
+class ComponentEvidence:
+    """A real-world commercial hardware component backed by external web/datasheet evidence."""
+    component_id: str
+    manufacturer: str
+    part_number: str
+    category: str  # "dram", "storage", "pmic", "accelerator", "usb_controller", "cpu", "discrete"
+    datasheet_url: Optional[str] = None
+    source_urls: list[str] = field(default_factory=list)
+    package: str = "unknown"
+    length_mm: Optional[float] = None
+    width_mm: Optional[float] = None
+    height_mm: Optional[float] = None
+    mass_g: Optional[float] = None
+    power_w: Optional[float] = None
+    voltage_v: Optional[float] = None
+    interface: str = "unknown"
+    memory_capacity_gb: Optional[float] = None
+    compute_capability_tops: Optional[float] = None
+    temperature_range: Optional[str] = None
+    availability_status: str = "active"
+    source_date: str = field(default_factory=lambda: datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+    confidence: float = 0.85
+    extracted_specification: dict[str, Any] = field(default_factory=dict)
+    raw_evidence: str = ""
+
+    @property
+    def footprint_area_mm2(self) -> float:
+        if self.length_mm is not None and self.width_mm is not None:
+            return self.length_mm * self.width_mm
+        return 0.0
+
+
+# ── Target Specification ─────────────────────────────────────────────
+
+@dataclass
+class TargetSpecification:
+    """Configurable system-level target specification for an independent portable AI computer."""
+    target_name: str = "Portable Independent AI Computer"
+    max_length_mm: float = 100.0
+    max_width_mm: float = 30.0
+    max_height_mm: float = 12.0
+    max_volume_mm3: float = 36000.0  # 100 * 30 * 12
+    max_power_w: float = 5.0
+    max_temperature_c: float = 85.0
+    min_ram_gb: float = 8.0
+    min_storage_gb: float = 256.0
+    target_model: str = "Qwen3-4B"
+    target_model_quantization: str = "INT4"
+    min_tokens_per_second: float = 15.0
+    max_latency_ms: float = 200.0
+    host_interfaces: list[str] = field(default_factory=lambda: ["USB-C"])
+    host_platforms: list[str] = field(default_factory=lambda: ["Android", "Linux", "Windows"])
+    max_cost: Optional[float] = None
+    process_node: str = "28nm"
+    package_constraints: dict[str, Any] = field(default_factory=dict)
+    ambient_temp_c: float = 30.0
+    thermal_resistance_c_per_w: float = 10.0
+
+    # Backward-compatible property bridges with DevicePhysicalEnvelope
+    @property
+    def enclosure_length_mm(self) -> float:
+        return self.max_length_mm
+
+    @property
+    def enclosure_width_mm(self) -> float:
+        return self.max_width_mm
+
+    @property
+    def enclosure_height_mm(self) -> float:
+        return self.max_height_mm
+
+    @property
+    def max_junction_temp_c(self) -> float:
+        return self.max_temperature_c
+
+    @property
+    def min_tokens_per_sec(self) -> float:
+        return self.min_tokens_per_second
+
+    @property
+    def target_model_name(self) -> str:
+        return f"{self.target_model}-{self.target_model_quantization}"
+
+    @property
+    def target_model_params_b(self) -> float:
+        return 4.0 if "4b" in self.target_model.lower() else 1.5
+
+    @property
+    def weight_bits(self) -> int:
+        return 4 if "int4" in self.target_model_quantization.lower() else 8
+
+    @property
+    def interface_type(self) -> str:
+        return self.host_interfaces[0] if self.host_interfaces else "USB-C"
+
+    @property
+    def max_pcb_area_mm2(self) -> float:
+        usable_l = max(0.0, self.max_length_mm - 4.0)
+        usable_w = max(0.0, self.max_width_mm - 4.0)
+        return usable_l * usable_w * 1.8
+
 
