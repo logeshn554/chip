@@ -208,6 +208,10 @@ class ParetoFrontier:
     - memory (GB, MAXIMIZE)
     - thermal (junction temperature °C, MINIMIZE)
     - physical_size (PCB mm2 or volume mm3, MINIMIZE)
+
+    TRUTHFULNESS RULE: Candidates with unmeasured metrics (None values) are tracked
+    separately as UNRANKED and cannot participate in Pareto dominance comparisons.
+    No fabricated fallback defaults are used.
     """
 
     OBJECTIVES = {
@@ -222,52 +226,82 @@ class ParetoFrontier:
 
     def __init__(self):
         self.frontier: list[HardwareArchitectureCandidate] = []
+        self.unranked: list[HardwareArchitectureCandidate] = []  # Candidates with incomplete metrics
 
     @classmethod
-    def extract_metrics(cls, candidate: HardwareArchitectureCandidate) -> dict[str, float]:
-        """Extract standardized metric values for Pareto evaluation."""
+    def extract_metrics(cls, candidate: HardwareArchitectureCandidate) -> dict[str, Optional[float]]:
+        """Extract standardized metric values for Pareto evaluation.
+
+        Returns None for any metric that has no measured or explicitly-set value.
+        NEVER falls back to fabricated default constants.
+        """
         pm = candidate.pareto_metrics
-        # Area: synthesis cells or PCB footprint
+
+        # Area: only from pareto_metrics or actual synthesis (never estimated target_cells)
         area = pm.get("area")
         if area is None:
-            synth_cells = candidate.actual_synthesis_metrics.get("cells") or candidate.estimated_resource_requirements.get("target_cells", 500.0)
-            area = float(synth_cells)
+            actual_cells = candidate.actual_synthesis_metrics.get("cells")
+            if actual_cells is not None and actual_cells > 0:
+                area = float(actual_cells)
 
-        # Power: W
-        power = pm.get("power", candidate.estimated_constraints.get("power_w", 5.0))
+        # Power: only from pareto_metrics or estimated_constraints (no fabricated default)
+        power = pm.get("power")
+        if power is None:
+            power = candidate.estimated_constraints.get("power_w")
 
-        # Timing / Latency: cycles or ms
-        timing = pm.get("timing", candidate.estimated_resource_requirements.get("estimated_latency_cycles", 2.0))
+        # Timing / Latency
+        timing = pm.get("timing")
+        if timing is None:
+            timing = candidate.estimated_resource_requirements.get("estimated_latency_cycles")
 
-        # Throughput: tokens/sec
-        throughput = pm.get("throughput", candidate.estimated_constraints.get("tokens_per_sec", 10.0))
+        # Throughput
+        throughput = pm.get("throughput")
+        if throughput is None:
+            throughput = candidate.estimated_constraints.get("tokens_per_sec")
 
-        # Memory: GB
-        memory = pm.get("memory", candidate.estimated_constraints.get("ram_gb", 4.0))
+        # Memory
+        memory = pm.get("memory")
+        if memory is None:
+            memory = candidate.estimated_constraints.get("ram_gb")
 
-        # Thermal: junction °C
-        thermal = pm.get("thermal", candidate.estimated_constraints.get("junction_temp_c", 60.0))
+        # Thermal
+        thermal = pm.get("thermal")
+        if thermal is None:
+            thermal = candidate.estimated_constraints.get("junction_temp_c")
 
-        # Physical size: mm2
-        physical_size = pm.get("physical_size", candidate.estimated_constraints.get("pcb_area_mm2", 1500.0))
+        # Physical size
+        physical_size = pm.get("physical_size")
+        if physical_size is None:
+            physical_size = candidate.estimated_constraints.get("pcb_area_mm2")
 
         return {
-            "area": float(area),
-            "power": float(power),
-            "timing": float(timing),
-            "throughput": float(throughput),
-            "memory": float(memory),
-            "thermal": float(thermal),
-            "physical_size": float(physical_size),
+            "area": float(area) if area is not None else None,
+            "power": float(power) if power is not None else None,
+            "timing": float(timing) if timing is not None else None,
+            "throughput": float(throughput) if throughput is not None else None,
+            "memory": float(memory) if memory is not None else None,
+            "thermal": float(thermal) if thermal is not None else None,
+            "physical_size": float(physical_size) if physical_size is not None else None,
         }
 
     @classmethod
-    def dominates(cls, metrics_a: dict[str, float], metrics_b: dict[str, float]) -> bool:
-        """Return True if solution A Pareto-dominates solution B across all 7 objectives."""
+    def has_complete_metrics(cls, metrics: dict[str, Optional[float]]) -> bool:
+        """Return True if all 7 objectives have measured (non-None) values."""
+        return all(v is not None for v in metrics.values())
+
+    @classmethod
+    def dominates(cls, metrics_a: dict[str, Optional[float]], metrics_b: dict[str, Optional[float]]) -> bool:
+        """Return True if solution A Pareto-dominates solution B across all 7 objectives.
+
+        If either candidate has any None metric, dominance cannot be established.
+        """
+        if not cls.has_complete_metrics(metrics_a) or not cls.has_complete_metrics(metrics_b):
+            return False  # Cannot determine dominance with missing data
+
         at_least_one_strictly_better = False
         for obj, direction in cls.OBJECTIVES.items():
-            val_a = metrics_a.get(obj, 0.0)
-            val_b = metrics_b.get(obj, 0.0)
+            val_a = metrics_a[obj]
+            val_b = metrics_b[obj]
 
             if direction == "min":
                 if val_a > val_b:  # A is worse
@@ -285,10 +319,20 @@ class ParetoFrontier:
     def add(self, candidate: HardwareArchitectureCandidate) -> bool:
         """
         Attempt to add candidate to the Pareto frontier.
-        Prunes existing members that are now dominated.
-        Returns True if candidate was non-dominated and added.
+        Candidates with incomplete metrics are tracked separately as UNRANKED.
+        Returns True if candidate was non-dominated and added to the frontier.
         """
         cand_metrics = self.extract_metrics(candidate)
+
+        # Candidates with incomplete metrics cannot be Pareto-ranked
+        if not self.has_complete_metrics(cand_metrics):
+            logger.debug(
+                f"Candidate {candidate.architecture_id} has incomplete metrics "
+                f"({[k for k, v in cand_metrics.items() if v is None]}); tracked as UNRANKED."
+            )
+            if candidate not in self.unranked:
+                self.unranked.append(candidate)
+            return False
 
         # Check if candidate is dominated by any existing member
         for existing in self.frontier:
@@ -311,10 +355,15 @@ class ParetoFrontier:
         """Return all current non-dominated candidates on the frontier."""
         return list(self.frontier)
 
+    def get_unranked(self) -> list[HardwareArchitectureCandidate]:
+        """Return candidates tracked as UNRANKED due to incomplete metrics."""
+        return list(self.unranked)
+
     def select_best_for_target(self, target_spec: TargetSpecification) -> Optional[HardwareArchitectureCandidate]:
         """
         Select the highest-performing candidate from the Pareto frontier that satisfies
         all declared target specification constraints.
+        Only candidates with complete, non-None metrics are eligible.
         """
         if not self.frontier:
             return None
@@ -323,6 +372,9 @@ class ParetoFrontier:
         valid_cands = []
         for cand in self.frontier:
             m = self.extract_metrics(cand)
+            # Skip candidates with incomplete metrics
+            if not self.has_complete_metrics(m):
+                continue
             if (
                 m["power"] <= target_spec.max_power_w
                 and m["thermal"] <= target_spec.max_temperature_c
@@ -332,7 +384,12 @@ class ParetoFrontier:
             ):
                 valid_cands.append(cand)
 
-        pool = valid_cands if valid_cands else self.frontier
+        # Fall back to all fully-measured frontier candidates
+        pool = valid_cands if valid_cands else [
+            c for c in self.frontier if self.has_complete_metrics(self.extract_metrics(c))
+        ]
+        if not pool:
+            return None
 
         # Rank by distance to ideal normalized utopian point
         def _target_score(cand: HardwareArchitectureCandidate) -> float:
@@ -448,25 +505,28 @@ class CustomChipGenerator:
                 "die_area_mm2": round(est_die_area_mm2, 2),
                 "package_area_mm2": round(est_package_area_mm2, 1),
                 "estimated_latency_cycles": pipeline_depth,
+                "estimation_method": "analytical_scaling_model",
+                "confidence": 0.3,
             },
-            actual_synthesis_metrics={
-                "cells": total_cells,
-                "cell_area": total_cells * 3.14,
-                "synthesis_tool": "Yosys",
-            },
+            # TRUTHFULNESS: actual_synthesis_metrics is EMPTY until real Yosys runs.
+            # Never pre-populate with analytical estimates.
+            actual_synthesis_metrics={},
             estimated_constraints={
                 "power_w": est_power_w,
                 "junction_temp_c": target_spec.ambient_temp_c + (est_power_w * target_spec.thermal_resistance_c_per_w),
                 "pcb_area_mm2": est_package_area_mm2 * 2.2,  # PCB area with supporting passives
                 "tokens_per_sec": 18.5 if precision == "INT4" else 12.0,
                 "ram_gb": target_spec.min_ram_gb,
+                "estimation_method": "analytical_scaling_model",
+                "confidence": 0.3,
             },
-            verification_status="passed",
-            reward=0.85,
+            verification_status="unverified",  # No EDA tool has verified this candidate
+            reward=0.0,  # TRUTHFULNESS: Reward must come from actual evaluation, not be pre-assigned
             is_hypothesis=True,
             validation_status="UNVERIFIED",
             custom_chip=True,
             chip_generation=generation,
+            # pareto_metrics from analytical estimates (not measured)
             pareto_metrics={
                 "area": float(total_cells),
                 "power": est_power_w,
@@ -476,11 +536,13 @@ class CustomChipGenerator:
                 "thermal": target_spec.ambient_temp_c + (est_power_w * target_spec.thermal_resistance_c_per_w),
                 "physical_size": est_package_area_mm2 * 2.2,
             },
-            verification_level=VerificationLevel.SYNTHESIS_VALID.value,
+            # TRUTHFULNESS: Cannot claim SYNTHESIS_VALID until real Yosys synthesis succeeds
+            verification_level=VerificationLevel.PHYSICALLY_ESTIMATED.value,
             metadata={
                 "process_node": target_spec.process_node,
                 "clock_domains": ["clk_sys_200mhz", "clk_npu_400mhz"],
                 "verification_plan": ["cocotb_matrix_multiply", "formal_axi_handshake", "power_domain_isolation"],
+                "metric_provenance": "analytical_scaling_model",
             },
         )
         return candidate
@@ -990,7 +1052,11 @@ class ArchitectureSearchEngine:
         self,
         candidates: list[HardwareArchitectureCandidate],
     ) -> list[HardwareArchitectureCandidate]:
-        """Rank candidates using grounded verification status, constraint states, and reward."""
+        """Rank candidates using grounded verification status, constraint states, and reward.
+
+        Candidates with unknown/unmeasured metrics are penalized rather than
+        receiving credit from fabricated defaults.
+        """
         def _score(c: HardwareArchitectureCandidate) -> float:
             score = c.reward
             if c.validation_status == "VALIDATED_ARCHITECTURE":
@@ -1003,10 +1069,17 @@ class ArchitectureSearchEngine:
             elif c.verification_status == "failed":
                 score -= 3.0
 
-            # Favor compact cell count
-            cells = c.actual_synthesis_metrics.get("cells") or c.estimated_resource_requirements.get("target_cells")
-            if cells and cells > 0:
-                score += 50.0 / cells
+            # Favor compact ACTUAL cell count (only from real synthesis)
+            actual_cells = c.actual_synthesis_metrics.get("cells")
+            if actual_cells and actual_cells > 0:
+                score += 50.0 / actual_cells
+            else:
+                # No actual synthesis data: penalize unknown metrics
+                score -= 0.5
+
+            # Penalize candidates with many unknown constraint states
+            unknown_count = sum(1 for v in c.constraint_states.values() if v == "UNKNOWN")
+            score -= unknown_count * 0.3
 
             return score
 

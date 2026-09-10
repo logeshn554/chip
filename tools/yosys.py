@@ -34,14 +34,23 @@ class YosysTool:
         os.makedirs(work_dir, exist_ok=True)
         self._has_binary = shutil.which(binary) is not None
 
-    def analyze_synthesizability(self, code: str, top_module: str = "mac") -> dict[str, Any]:
-        """Analyze SystemVerilog code for synthesizability and compute resource estimates."""
+    def _heuristic_lint_check(self, code: str, top_module: str = "mac") -> dict[str, Any]:
+        """Heuristic-only lint check using regex pattern matching.
+
+        WARNING: This is NOT synthesis. Output values are rough heuristic guesses
+        from source code patterns. They must NEVER be used for reward computation,
+        Pareto ranking, or training data.
+        """
+        logger.warning(
+            f"Using heuristic lint check for '{top_module}'. "
+            "Results are NOT from real synthesis and must not be used for reward or ranking."
+        )
         # 1. Check for unsynthesizable constructs
         if "initial begin" in code and "pragma translate_off" not in code:
             return {
                 "stage": "yosys",
                 "status": "failed",
-                "metric_type": "estimated",
+                "metric_type": "heuristic_lint_only",
                 "error": "Synthesis error: 'initial' construct is not synthesizable in ASIC/FPGA target.",
                 "file": f"{top_module}.sv",
                 "line": 12,
@@ -52,7 +61,7 @@ class YosysTool:
             return {
                 "stage": "yosys",
                 "status": "failed",
-                "metric_type": "estimated",
+                "metric_type": "heuristic_lint_only",
                 "error": "Synthesis error: Delays (#t) cannot be synthesized into physical logic.",
                 "file": f"{top_module}.sv",
                 "line": 15,
@@ -85,23 +94,23 @@ class YosysTool:
         total_cells = dff_count + mult_cells + add_cells + misc_cells
         total_cells = max(total_cells, 10)
         logic_cells = max(0, total_cells - dff_count)
-        estimated_area = round(total_cells * 3.14, 2)  # typical 65nm cell area in um^2
+        heuristic_area = round(total_cells * 3.14, 2)  # rough guess, NOT from synthesis
 
         return {
             "stage": "yosys",
             "status": "passed",
-            "metric_type": "estimated",
+            "metric_type": "heuristic_lint_only",
             "top_module": top_module,
-            "cells": total_cells,
+            "heuristic_cell_guess": total_cells,
             "dffs": dff_count,
             "logic_cells": logic_cells,
             "wires": total_cells + 15,
-            "estimated_area": estimated_area,
+            "heuristic_area_guess": heuristic_area,
             "critical_path_ns": None,
             "power_estimate_uw": None,
-            "warnings": [],
+            "warnings": ["Values are heuristic guesses from regex, NOT from synthesis."],
             "error": "",
-            "raw_log": "Generated via internal static synthesizability analyzer.",
+            "raw_log": "Generated via internal heuristic lint check (NOT synthesis).",
         }
 
     async def synthesize(
@@ -227,7 +236,7 @@ class YosysTool:
                 "estimated_area": None,
             }
 
-        return self.analyze_synthesizability(code, top_module=top_module)
+        return self._heuristic_lint_check(code, top_module=top_module)
 
     async def execute(self, **kwargs: Any) -> dict[str, Any]:
         """Strict tool entrypoint for RUN_YOSYS and SYNTHESIZE."""

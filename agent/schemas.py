@@ -519,6 +519,35 @@ class VerificationLevel(str, Enum):
     SILICON_VERIFIED = "SILICON_VERIFIED"
 
 
+class MetricStatus(str, Enum):
+    """Truthfulness status for any hardware metric value.
+
+    Determines whether the metric can be used for reward computation,
+    Pareto ranking, and training data.
+    """
+    MEASURED = "MEASURED"                          # From real EDA tool output (Yosys, Verilator, etc.)
+    ESTIMATED = "ESTIMATED"                        # From analytical model with stated assumptions
+    UNKNOWN = "UNKNOWN"                            # Not yet evaluated
+    PLACEHOLDER_DO_NOT_USE = "PLACEHOLDER_DO_NOT_USE"  # Fabricated default; must not enter reward or ranking
+
+
+@dataclass
+class MetricProvenance:
+    """Tracks the source, method, and confidence of a hardware metric value.
+
+    Every metric in the system must be accompanied by provenance to prevent
+    fabricated or estimated values from contaminating reward signals and
+    Pareto frontier rankings.
+    """
+    value: Optional[float] = None
+    source: str = "unknown"         # e.g., "yosys_synthesis", "analytical_model", "manufacturer_datasheet"
+    method: str = "unknown"         # e.g., "actual_cell_count", "analytical_scaling_model", "regex_heuristic"
+    confidence: float = 0.0         # 0.0 (no confidence) to 1.0 (measured by calibrated tool)
+    status: MetricStatus = MetricStatus.UNKNOWN
+    tool_version: str = ""          # e.g., "yosys-0.40", "verilator-5.024"
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
 # ── Real-World Component Evidence ────────────────────────────────────
 
 @dataclass

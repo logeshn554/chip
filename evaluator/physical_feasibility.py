@@ -44,6 +44,9 @@ class PhysicalFeasibilityReport:
     failure_categories: list[str] = field(default_factory=list)
     recommendation: str = ""
     escalate_to_custom_chip: bool = False
+    # TRUTHFULNESS: Always declare the estimation method so downstream consumers
+    # know this is an analytical model, not a physical measurement.
+    estimation_method: str = "analytical_envelope_model_v1"
 
 
 class PhysicalFeasibilityEngine:

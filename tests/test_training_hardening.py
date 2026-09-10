@@ -25,9 +25,9 @@ class TestYosysFallbackHardening:
 
         # With fallback enabled (manual dev inspect)
         sample_code = "module dummy (input a, output y); assign y = ~a; endmodule"
-        res_heur = tool.analyze_synthesizability(sample_code, top_module="dummy")
-        assert res_heur["metric_type"] == "estimated"
-        assert "estimated_area" in res_heur
+        res_heur = tool._heuristic_lint_check(sample_code, top_module="dummy")
+        assert res_heur["metric_type"] == "heuristic_lint_only"
+        assert "heuristic_area_guess" in res_heur
 
     @pytest.mark.asyncio
     async def test_grpo_evaluator_never_uses_heuristic_area(self, tmp_path, monkeypatch):
