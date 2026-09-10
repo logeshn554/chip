@@ -40,6 +40,14 @@ class LLMResponse:
     finish_reason: str = "stop"
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def tokens_used(self) -> int:
+        return self.total_tokens or self.completion_tokens
+
+    @property
+    def model(self) -> str:
+        return self.metadata.get("model", "")
+
 
 class LLMInterface(ABC):
     """Abstract base class for LLM client implementations."""

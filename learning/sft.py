@@ -91,7 +91,8 @@ class SFTTrainer:
         get_peft_model = peft.get_peft_model
         AutoModelForCausalLM = transformers.AutoModelForCausalLM
         AutoTokenizer = transformers.AutoTokenizer
-        SFTTrainer = getattr(trl, "SFTTrainer")
+        TRLSFTTrainer = getattr(trl, "SFTTrainer")
+        SFTTrainer = TRLSFTTrainer
         SFTConfig = getattr(trl, "SFTConfig")
 
         has_cuda = torch.cuda.is_available()

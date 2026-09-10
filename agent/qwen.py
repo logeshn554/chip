@@ -74,8 +74,11 @@ class QwenClient(LLMInterface):
 
         logger.info(f"Loading model {self.model_name} via Transformers...")
         try:
-            import torch
-            from transformers import AutoModelForCausalLM, AutoTokenizer
+            import importlib
+            torch = importlib.import_module("torch")
+            transformers = importlib.import_module("transformers")
+            AutoModelForCausalLM = transformers.AutoModelForCausalLM
+            AutoTokenizer = transformers.AutoTokenizer
 
             device_str, dtype = get_torch_device_and_dtype()
             device_map = self.config.get("device_map", "auto" if device_str != "cpu" else None)
@@ -242,8 +245,8 @@ class QwenClient(LLMInterface):
         return LLMResponse(
             text=resp.content,
             raw_response={"thinking": resp.thinking, "raw": resp.raw_output},
-            tokens_used=resp.tokens_used,
-            model=self.model_name,
+            completion_tokens=resp.tokens_used,
+            total_tokens=resp.tokens_used,
             metadata={
                 "provider": self.backend,
                 "model": self.model_name,
