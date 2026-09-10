@@ -54,21 +54,71 @@ You must respond with valid JSON only. Do not output conversational preamble.
 ```
 """
 
-RESEARCH_DECISION_PROMPT = """Analyze the hardware design task below.
-Determine whether external web research is strictly necessary, or if standard digital design concepts suffice.
-Remember: Do not search the web unless external specifications (e.g. unknown standard, protocol, or novel ISA extension) are genuinely needed.
+RESEARCH_DECISION_PROMPT = """You are a hardware design planning agent. Analyze the hardware task below.
 
 Task: {task}
 
-Respond with JSON:
-```json
+Open questions that need to be resolved before starting:
+{open_questions}
+
+Decide whether external web research is strictly necessary:
+- If all open questions can be answered from standard digital design textbooks, return needs_research=false and memory_sufficient=true.
+- If one or more open questions require external datasheets, standards, or specifications, return needs_research=true.
+- Never return memory_sufficient=true unless you are certain the internal knowledge base covers the complete specification.
+
+Respond with VALID JSON ONLY (no markdown):
 {{
-  "needs_research": true/false,
-  "reasoning": "...",
-  "focused_query": "specific query if needed",
-  "recommended_action": "RETRIEVE_MEMORY" or "SEARCH_WEB" or "CREATE_RTL"
+  "needs_research": true,
+  "memory_sufficient": false,
+  "reasoning": "one-sentence justification",
+  "recommended_action": "SEARCH_WEB"
 }}
-```
+"""
+
+
+TASK_DECOMPOSITION_PROMPT = """You are a hardware architecture planning agent.
+
+Decompose the following hardware design task into its constituent unknowns.
+
+Task: {task}
+
+Identify:
+1. open_questions: A list of specific technical questions that must be answered before the architecture can be designed. Each question should be precise (e.g., "What is the maximum power budget in watts?", not "what are the specs?").
+2. physical_design: true if this task requires a physical board or chip design (PCB layout, package selection, BOM), false if it is a pure RTL/functional design task.
+3. component_categories: A list of hardware component categories that will likely need to be sourced (e.g. ["dram", "storage", "usb_controller", "pmic", "accelerator"]). Return an empty list [] for pure RTL tasks.
+
+Respond with VALID JSON ONLY (no markdown):
+{{
+  "open_questions": ["question 1", "question 2"],
+  "physical_design": false,
+  "component_categories": []
+}}
+"""
+
+
+RESEARCH_ROUND_PROMPT = """You are a hardware research query generator.
+
+Task: {task}
+
+Open questions to answer through web research:
+{open_questions}
+
+Component categories that need to be sourced:
+{component_categories}
+
+Generate an ordered list of focused, specific web search queries that will resolve the open questions.
+Each query should:
+- Be specific enough to find a datasheet, standard, or technical specification
+- Include relevant technical keywords (e.g. part number, standard name, protocol version)
+- NOT be generic (e.g. "hardware specs" is too vague)
+
+Respond with VALID JSON ONLY (no markdown):
+{{
+  "queries": [
+    "specific query 1",
+    "specific query 2"
+  ]
+}}
 """
 
 ERROR_ANALYSIS_PROMPT = """Analyze the following structured failure from {stage}:

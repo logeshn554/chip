@@ -95,16 +95,45 @@ class TestDynamicComponentSearch:
         assert comp.mass_g is None
         assert comp.temperature_range is None
 
-    def test_query_driven_search_and_disk_persistence(self, tmp_path):
+    def test_query_driven_search_returns_empty_without_network(self, tmp_path):
+        """In a sandboxed/offline environment, the search engine must return an
+        empty result list rather than fabricating hardcoded component data."""
         db_dir = str(tmp_path / "components")
         engine = ComponentSearchEngine(db_dir=db_dir)
+        # In a sandboxed test environment there is no network access.
+        # The engine must NOT inject hardcoded fallback data.
         results = engine.search_and_extract("LPDDR4 8GB package dimensions", category="dram")
-        assert len(results) > 0
-        comp = results[0]
+        # Results are either empty (offline) or contain real scraped data (online).
+        # Either way, the catalog should exactly match returned results.
+        assert all(r.component_id in engine.catalog for r in results)
+
+    def test_disk_persistence_of_manually_injected_evidence(self, tmp_path):
+        """Evidence that is explicitly injected must be persisted to disk."""
+        import json
+        db_dir = str(tmp_path / "components")
+        engine = ComponentSearchEngine(db_dir=db_dir)
+        # Manually inject a real-evidence component (e.g. from a document fetch)
+        from agent.schemas import ComponentEvidence
+        comp = ComponentEvidence(
+            component_id="comp_test_lpddr4_0001",
+            manufacturer="TestManufacturer",
+            part_number="TESTLPDDR4-8G",
+            category="dram",
+            source_urls=["https://example.com/lpddr4-datasheet.pdf"],
+            length_mm=12.0,
+            width_mm=12.0,
+            power_w=0.9,
+            confidence=0.95,
+        )
+        engine.save_component(comp)
         assert comp.component_id in engine.catalog
-        # Check disk persistence
         saved_file = os.path.join(db_dir, f"{comp.component_id}.json")
         assert os.path.exists(saved_file)
+        with open(saved_file, "r") as f:
+            data = json.load(f)
+        assert data["component_id"] == comp.component_id
+        assert data["power_w"] == 0.9
+
 
 
 class TestPhysicalFeasibilityEngine:

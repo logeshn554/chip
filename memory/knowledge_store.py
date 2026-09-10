@@ -37,41 +37,110 @@ class KnowledgeChunk:
             self.chunk_id = f"k_{abs(hash(self.content + self.source_url)) % 1000000:06d}"
 
 
+def _chroma_probe_and_wipe_if_corrupt(persist_dir: str) -> None:
+    """Pre-flight check: open the ChromaDB sysdb SQLite and verify it is readable.
+
+    If the sysdb contains an old schema (missing '_type' key in collection
+    configuration JSON), the file is corrupt relative to the installed ChromaDB
+    version.  We delete the entire directory so a fresh PersistentClient can
+    start from a clean state.
+
+    This must run BEFORE creating chromadb.PersistentClient, because the client
+    opens and caches the SQLite connection during __init__.
+    """
+    import shutil
+    import sqlite3
+    import json as _json
+
+    sysdb_path = os.path.join(persist_dir, "chroma.sqlite3")
+    if not os.path.exists(sysdb_path):
+        return  # Fresh directory — no corruption possible
+
+    try:
+        conn = sqlite3.connect(sysdb_path)
+        cur = conn.cursor()
+        cur.execute("SELECT config_json_str FROM collections LIMIT 100")
+        rows = cur.fetchall()
+        conn.close()
+        for (config_str,) in rows:
+            if config_str:
+                try:
+                    cfg = _json.loads(config_str)
+                    if "_type" not in cfg:
+                        raise ValueError(f"Missing '_type' key in collection config: {config_str[:80]}")
+                except Exception:
+                    raise
+    except Exception as probe_err:
+        logger.warning(
+            f"ChromaDB sysdb at '{sysdb_path}' is corrupt or incompatible ({probe_err}). "
+            "Wiping directory before creating fresh client."
+        )
+        shutil.rmtree(persist_dir, ignore_errors=True)
+        os.makedirs(persist_dir, exist_ok=True)
+
+
 class KnowledgeStore:
     """Vector database backed knowledge memory store."""
 
     def __init__(self, persist_dir: str = "./data/chroma/knowledge"):
         self.persist_dir = persist_dir
         os.makedirs(persist_dir, exist_ok=True)
+        # Pre-flight: check the SQLite sysdb for corruption before creating the client.
+        _chroma_probe_and_wipe_if_corrupt(persist_dir)
         self.client = chromadb.PersistentClient(
             path=persist_dir,
             settings=Settings(anonymized_telemetry=False),
         )
-        self.collection = self.client.get_or_create_collection(
-            name="hardware_knowledge",
-            metadata={"description": "Hardware design technical knowledge and specs"},
-        )
-        # Pre-seed essential knowledge if empty
+        self.collection = self._get_or_rebuild_collection()
+
+    def _get_or_rebuild_collection(self):
+        """Create the collection, recovering from any schema corruption.
+
+        If the ChromaDB sysdb SQLite file itself is corrupt, we delete the
+        entire persist_dir and start fresh with a new PersistentClient.
+        """
         try:
-            if self.collection.count() == 0:
-                self._seed_default_knowledge()
-        except Exception as e:
-            logger.warning(f"Incompatible or corrupted Chroma collection detected ({e}). Re-creating collection.")
+            coll = self.client.get_or_create_collection(
+                name="hardware_knowledge",
+                metadata={"description": "Hardware design technical knowledge and specs"},
+            )
+            # Probe for schema corruption
+            coll.count()
             try:
-                self.client.delete_collection("hardware_knowledge")
+                if coll.count() == 0:
+                    self._seed_default_knowledge_into(coll)
+            except Exception as probe_err:
+                logger.debug(f"Seed probe failed (non-fatal): {probe_err}")
+            return coll
+        except Exception as init_err:
+            logger.warning(
+                f"ChromaDB collection 'hardware_knowledge' is corrupted ({init_err}). "
+                "Wiping persist_dir and re-creating fresh store."
+            )
+            import shutil
+            try:
+                shutil.rmtree(self.persist_dir, ignore_errors=True)
             except Exception:
                 pass
-            self.collection = self.client.get_or_create_collection(
+            os.makedirs(self.persist_dir, exist_ok=True)
+            self.client = chromadb.PersistentClient(
+                path=self.persist_dir,
+                settings=Settings(anonymized_telemetry=False),
+            )
+            coll = self.client.get_or_create_collection(
                 name="hardware_knowledge",
                 metadata={"description": "Hardware design technical knowledge and specs"},
             )
             try:
-                self._seed_default_knowledge()
-            except Exception as e2:
-                logger.warning(f"Could not re-seed knowledge store: {e2}")
+                self._seed_default_knowledge_into(coll)
+            except Exception as seed_err:
+                logger.warning(f"Could not re-seed knowledge store: {seed_err}")
+            return coll
 
-    def _seed_default_knowledge(self) -> None:
-        """Seed core SystemVerilog and MAC design guidelines."""
+
+
+    def _seed_default_knowledge_into(self, coll) -> None:
+        """Seed core SystemVerilog and MAC design guidelines into a given collection."""
         seeds = [
             KnowledgeChunk(
                 title="SystemVerilog Signed Arithmetic and Multiply-Accumulate (MAC)",
@@ -113,8 +182,27 @@ class KnowledgeStore:
                 ),
             ),
         ]
-        self.add_chunks(seeds)
+        ids = [c.chunk_id for c in seeds]
+        docs = [c.content for c in seeds]
+        metas = [
+            {
+                "source_url": c.source_url,
+                "title": c.title,
+                "topic": c.topic,
+                "document_type": c.document_type,
+                "timestamp": c.timestamp,
+                "chunk_id": c.chunk_id,
+            }
+            for c in seeds
+        ]
+        coll.upsert(ids=ids, documents=docs, metadatas=metas)
         logger.info(f"Seeded {len(seeds)} default knowledge chunks into KnowledgeStore.")
+
+    def _seed_default_knowledge(self) -> None:
+        """Seed core SystemVerilog and MAC design guidelines."""
+        self._seed_default_knowledge_into(self.collection)
+
+
 
     def add_chunk(self, chunk: KnowledgeChunk) -> str:
         """Add a single knowledge chunk."""

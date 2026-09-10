@@ -102,40 +102,115 @@ def categorize_error(error_text: str) -> str:
     return "GENERAL"
 
 
+def _chroma_probe_and_wipe_if_corrupt(persist_dir: str) -> None:
+    """Pre-flight check: open the ChromaDB sysdb SQLite and verify it is readable.
+
+    If the sysdb contains an old schema (missing '_type' key in collection
+    configuration JSON), the file is corrupt relative to the installed ChromaDB
+    version.  We delete the entire directory so a fresh PersistentClient can
+    start from a clean state.
+
+    This must run BEFORE creating chromadb.PersistentClient, because the client
+    opens and caches the SQLite connection during __init__.
+    """
+    import shutil
+    import sqlite3
+
+    sysdb_path = os.path.join(persist_dir, "chroma.sqlite3")
+    if not os.path.exists(sysdb_path):
+        return  # Fresh directory — no corruption possible
+
+    try:
+        conn = sqlite3.connect(sysdb_path)
+        cur = conn.cursor()
+        # Check if any collection has an invalid configuration JSON
+        cur.execute("SELECT config_json_str FROM collections LIMIT 100")
+        rows = cur.fetchall()
+        conn.close()
+        for (config_str,) in rows:
+            if config_str:
+                import json as _json
+                try:
+                    cfg = _json.loads(config_str)
+                    if "_type" not in cfg:
+                        raise ValueError(f"Missing '_type' key in collection config: {config_str[:80]}")
+                except Exception:
+                    raise  # propagate so we wipe below
+    except Exception as probe_err:
+        logger.warning(
+            f"ChromaDB sysdb at '{sysdb_path}' is corrupt or incompatible ({probe_err}). "
+            "Wiping directory before creating fresh client."
+        )
+        shutil.rmtree(persist_dir, ignore_errors=True)
+        os.makedirs(persist_dir, exist_ok=True)
+
+
 class ExperienceStore:
     """Experience memory store for learning from failures."""
+
 
     def __init__(self, persist_dir: str = "./data/chroma/experience"):
         self.persist_dir = persist_dir
         os.makedirs(persist_dir, exist_ok=True)
+        # Pre-flight: check the SQLite sysdb for corruption before creating the client.
+        # If corrupt, wipe the dir so the client starts from a clean state.
+        _chroma_probe_and_wipe_if_corrupt(persist_dir)
         self.client = chromadb.PersistentClient(
             path=persist_dir,
             settings=Settings(anonymized_telemetry=False),
         )
-        self.collection = self.client.get_or_create_collection(
-            name="hardware_experience",
-            metadata={"description": "Records of past hardware errors, fixes, and rewards"},
-        )
+        self.collection = self._get_or_rebuild_collection()
+
+
+    def _get_or_rebuild_collection(self):
+        """Create the collection, recovering from any schema corruption.
+
+        If the ChromaDB sysdb SQLite file itself is corrupt, we delete the
+        entire persist_dir and start fresh with a new PersistentClient.
+        """
         try:
-            if self.collection.count() == 0:
-                self._seed_common_experiences()
-        except Exception as e:
-            logger.warning(f"Incompatible or corrupted Chroma collection detected ({e}). Re-creating collection.")
+            coll = self.client.get_or_create_collection(
+                name="hardware_experience",
+                metadata={"description": "Records of past hardware errors, fixes, and rewards"},
+            )
+            # Probe for schema corruption
+            coll.count()
             try:
-                self.client.delete_collection("hardware_experience")
+                if coll.count() == 0:
+                    self._seed_common_experiences_into(coll)
+            except Exception as probe_err:
+                logger.debug(f"Seed probe failed (non-fatal): {probe_err}")
+            return coll
+        except Exception as init_err:
+            logger.warning(
+                f"ChromaDB collection 'hardware_experience' is corrupted ({init_err}). "
+                "Wiping persist_dir and re-creating fresh store."
+            )
+            # Wipe the entire directory — the SQLite sysdb itself may be corrupt
+            import shutil
+            try:
+                shutil.rmtree(self.persist_dir, ignore_errors=True)
             except Exception:
                 pass
-            self.collection = self.client.get_or_create_collection(
+            os.makedirs(self.persist_dir, exist_ok=True)
+            # Create a fresh client on the now-empty directory
+            self.client = chromadb.PersistentClient(
+                path=self.persist_dir,
+                settings=Settings(anonymized_telemetry=False),
+            )
+            coll = self.client.get_or_create_collection(
                 name="hardware_experience",
                 metadata={"description": "Records of past hardware errors, fixes, and rewards"},
             )
             try:
-                self._seed_common_experiences()
-            except Exception as e2:
-                logger.warning(f"Could not re-seed experience store: {e2}")
+                self._seed_common_experiences_into(coll)
+            except Exception as seed_err:
+                logger.warning(f"Could not re-seed experience store: {seed_err}")
+            return coll
 
-    def _seed_common_experiences(self) -> None:
-        """Seed known SystemVerilog MAC failure modes and their corrections."""
+
+    def _seed_common_experiences_into(self, coll) -> None:
+        """Seed known SystemVerilog failure modes into a given collection instance."""
         seed_cases = [
             Experience(
                 task="Design an 8-bit signed MAC",
@@ -172,8 +247,35 @@ class ExperienceStore:
             ),
         ]
         for exp in seed_cases:
-            self.add(exp)
+            meta = {
+                "task": exp.task,
+                "result": exp.result,
+                "reward": float(exp.reward),
+                "tool_sequence": json.dumps(exp.tool_sequence),
+                "timestamp": exp.timestamp,
+                "correction": exp.correction,
+                "error": exp.error,
+                "error_category": exp.error_category,
+                "error_signature": exp.error_signature,
+                "failure_type": exp.failure_type or exp.error_category,
+                "tool": exp.tool,
+                "root_cause": exp.root_cause,
+                "task_family": exp.task_family,
+                "architecture_family": exp.architecture_family,
+                "source_trajectory": exp.source_trajectory,
+                "confidence": float(exp.confidence),
+            }
+            coll.upsert(
+                ids=[exp.id],
+                documents=[exp.to_embedding_text()],
+                metadatas=[meta],
+            )
         logger.info(f"Seeded {len(seed_cases)} common experiences into ExperienceStore.")
+
+    def _seed_common_experiences(self) -> None:
+        """Seed known SystemVerilog MAC failure modes and their corrections."""
+        self._seed_common_experiences_into(self.collection)
+
 
     def add(self, exp: Experience) -> str:
         """Save an experience entry."""

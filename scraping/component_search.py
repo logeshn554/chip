@@ -244,42 +244,16 @@ class ComponentSearchEngine:
         discovered: list[ComponentEvidence] = []
 
         if not candidates:
-            # Fallback extraction from known technical specifications without hardcoding fixed URLs
-            # Uses representative manufacturer datasheets for offline or sandboxed execution
-            fallback_knowledge_snippets = [
-                {
-                    "text": "Samsung K3LK3K30EM-BGCN 8GB LPDDR5 SDRAM, 12.0 mm x 12.0 mm x 0.8 mm FBGA, 1.05V, 0.9W active power.",
-                    "url": "https://semiconductor.samsung.com/dram/lpddr/lpddr5/",
-                    "category": "dram",
-                },
-                {
-                    "text": "Micron MTFC256GAKECN 256GB UFS 3.1 flash memory storage, 11.5 mm x 13.0 mm x 1.0 mm BGA153, 0.45W active power.",
-                    "url": "https://www.micron.com/products/embedded-storage/ufs",
-                    "category": "storage",
-                },
-                {
-                    "text": "Realtek RTS5420 USB 3.2 Gen 2 Type-C SuperSpeed Controller, 9.0 mm x 9.0 mm QFN76, 0.35W power, USB-C interface.",
-                    "url": "https://www.realtek.com/en/products/communications-network-ics/item/rts5420",
-                    "category": "usb_controller",
-                },
-                {
-                    "text": "Hailo-8 M.2 AI Acceleration Module, 26 TOPS AI compute, 22.0 mm x 30.0 mm x 2.5 mm, 2.5W average power, PCIe/USB.",
-                    "url": "https://hailo.ai/products/ai-accelerators/hailo-8-m2-ai-acceleration-module/",
-                    "category": "accelerator",
-                },
-                {
-                    "text": "Texas Instruments TPS65987D USB-C and USB PD Controller with Integrated Power Switches, 7.0 mm x 7.0 mm QFN, 0.15W.",
-                    "url": "https://www.ti.com/product/TPS65987D",
-                    "category": "pmic",
-                },
-            ]
-
-            for item in fallback_knowledge_snippets:
-                if category_hint == "general" or item["category"] == category_hint or item["category"] in query.lower():
-                    comp = self.extract_component_evidence(item["text"], item["url"], item["category"])
-                    if comp:
-                        self.save_component(comp)
-                        discovered.append(comp)
+            # No web search results were available (offline / sandboxed environment).
+            # We do NOT inject hardcoded component data.  Instead we return a
+            # single SEARCH_UNAVAILABLE sentinel so callers know they must retry
+            # in a networked environment or accept that component data is absent.
+            logger.warning(
+                f"Component search for '{query}' (category={category_hint}) returned no candidates "
+                "because the web search endpoint is unreachable.  "
+                "No hardcoded fallback data will be used.  "
+                "Re-run in a networked environment to obtain real component evidence."
+            )
 
         for cand in candidates:
             evidence_text = f"{cand['title']} - {cand['snippet']}"
