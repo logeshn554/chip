@@ -30,6 +30,9 @@ from agent.schemas import (
     ConstraintState,
     FeasibilityLabel,
     HardwareArchitectureCandidate,
+    InformationClass,
+    MetricSet,
+    MetricValue,
     TargetSpecification,
     VerificationLevel,
 )
@@ -229,87 +232,276 @@ class ParetoFrontier:
         self.unranked: list[HardwareArchitectureCandidate] = []  # Candidates with incomplete metrics
 
     @classmethod
-    def extract_metrics(cls, candidate: HardwareArchitectureCandidate) -> dict[str, Optional[float]]:
-        """Extract standardized metric values for Pareto evaluation.
+    def extract_metric_objects(cls, candidate: HardwareArchitectureCandidate) -> dict[str, MetricValue]:
+        """Extract standardized MetricValue objects with full provenance.
 
-        Returns None for any metric that has no measured or explicitly-set value.
-        NEVER falls back to fabricated default constants.
+        Priority order:
+        1. candidate.metrics (canonical MetricSet)
+        2. actual_synthesis_metrics (for area MEASUREMENT from real Yosys)
+        3. pareto_metrics / estimated_constraints (ESTIMATE status)
         """
-        pm = candidate.pareto_metrics
+        res: dict[str, MetricValue] = {}
+        ms = getattr(candidate, "metrics", None)
+        pm = getattr(candidate, "pareto_metrics", {})
+        ec = getattr(candidate, "estimated_constraints", {})
+        err = getattr(candidate, "estimated_resource_requirements", {})
+        asm = getattr(candidate, "actual_synthesis_metrics", {})
 
-        # Area: only from pareto_metrics or actual synthesis (never estimated target_cells)
-        area = pm.get("area")
-        if area is None:
-            actual_cells = candidate.actual_synthesis_metrics.get("cells")
-            if actual_cells is not None and actual_cells > 0:
-                area = float(actual_cells)
+        # Area
+        mv_area = getattr(ms, "area", None) if ms else None
+        if mv_area and mv_area.value is not None and mv_area.status != InformationClass.UNKNOWN:
+            res["area"] = mv_area
+        elif asm.get("cells") is not None and asm.get("cells", 0) > 0:
+            res["area"] = MetricValue(
+                value=float(asm["cells"]),
+                unit="cells",
+                status=InformationClass.MEASUREMENT,
+                source="yosys_synthesis",
+                method="actual_cell_count",
+                confidence=1.0,
+            )
+        elif pm.get("area") is not None:
+            res["area"] = MetricValue(
+                value=float(pm["area"]),
+                unit="cells",
+                status=InformationClass.ESTIMATE,
+                source="pareto_metrics",
+                method="analytical_estimate",
+                confidence=0.5,
+            )
+        else:
+            res["area"] = MetricValue(unit="cells", status=InformationClass.UNKNOWN)
 
-        # Power: only from pareto_metrics or estimated_constraints (no fabricated default)
-        power = pm.get("power")
-        if power is None:
-            power = candidate.estimated_constraints.get("power_w")
+        # Power
+        mv_power = getattr(ms, "power", None) if ms else None
+        if mv_power and mv_power.value is not None and mv_power.status != InformationClass.UNKNOWN:
+            res["power"] = mv_power
+        elif pm.get("power") is not None:
+            res["power"] = MetricValue(
+                value=float(pm["power"]),
+                unit="W",
+                status=InformationClass.ESTIMATE,
+                source="pareto_metrics",
+                method="analytical_estimate",
+                confidence=0.5,
+            )
+        elif ec.get("power_w") is not None:
+            res["power"] = MetricValue(
+                value=float(ec["power_w"]),
+                unit="W",
+                status=InformationClass.ESTIMATE,
+                source="estimated_constraints",
+                method="analytical_model",
+                confidence=0.5,
+            )
+        else:
+            res["power"] = MetricValue(unit="W", status=InformationClass.UNKNOWN)
 
-        # Timing / Latency
-        timing = pm.get("timing")
-        if timing is None:
-            timing = candidate.estimated_resource_requirements.get("estimated_latency_cycles")
+        # Timing
+        mv_timing = getattr(ms, "timing", None) if ms else None
+        if mv_timing and mv_timing.value is not None and mv_timing.status != InformationClass.UNKNOWN:
+            res["timing"] = mv_timing
+        elif pm.get("timing") is not None:
+            res["timing"] = MetricValue(
+                value=float(pm["timing"]),
+                unit="cycles",
+                status=InformationClass.ESTIMATE,
+                source="pareto_metrics",
+                method="analytical_estimate",
+                confidence=0.5,
+            )
+        elif err.get("estimated_latency_cycles") is not None:
+            res["timing"] = MetricValue(
+                value=float(err["estimated_latency_cycles"]),
+                unit="cycles",
+                status=InformationClass.ESTIMATE,
+                source="estimated_resource_requirements",
+                method="pipeline_depth_model",
+                confidence=0.5,
+            )
+        else:
+            res["timing"] = MetricValue(unit="cycles", status=InformationClass.UNKNOWN)
 
         # Throughput
-        throughput = pm.get("throughput")
-        if throughput is None:
-            throughput = candidate.estimated_constraints.get("tokens_per_sec")
+        mv_tp = getattr(ms, "throughput", None) if ms else None
+        if mv_tp and mv_tp.value is not None and mv_tp.status != InformationClass.UNKNOWN:
+            res["throughput"] = mv_tp
+        elif pm.get("throughput") is not None:
+            res["throughput"] = MetricValue(
+                value=float(pm["throughput"]),
+                unit="tok/s",
+                status=InformationClass.ESTIMATE,
+                source="pareto_metrics",
+                method="analytical_estimate",
+                confidence=0.5,
+            )
+        elif ec.get("tokens_per_sec") is not None:
+            res["throughput"] = MetricValue(
+                value=float(ec["tokens_per_sec"]),
+                unit="tok/s",
+                status=InformationClass.ESTIMATE,
+                source="estimated_constraints",
+                method="analytical_model",
+                confidence=0.5,
+            )
+        else:
+            res["throughput"] = MetricValue(unit="tok/s", status=InformationClass.UNKNOWN)
 
         # Memory
-        memory = pm.get("memory")
-        if memory is None:
-            memory = candidate.estimated_constraints.get("ram_gb")
+        mv_mem = getattr(ms, "memory", None) if ms else None
+        if mv_mem and mv_mem.value is not None and mv_mem.status != InformationClass.UNKNOWN:
+            res["memory"] = mv_mem
+        elif pm.get("memory") is not None:
+            res["memory"] = MetricValue(
+                value=float(pm["memory"]),
+                unit="GB",
+                status=InformationClass.ESTIMATE,
+                source="pareto_metrics",
+                method="analytical_estimate",
+                confidence=0.5,
+            )
+        elif ec.get("ram_gb") is not None:
+            res["memory"] = MetricValue(
+                value=float(ec["ram_gb"]),
+                unit="GB",
+                status=InformationClass.ESTIMATE,
+                source="estimated_constraints",
+                method="datasheet_or_spec",
+                confidence=0.5,
+            )
+        else:
+            res["memory"] = MetricValue(unit="GB", status=InformationClass.UNKNOWN)
 
         # Thermal
-        thermal = pm.get("thermal")
-        if thermal is None:
-            thermal = candidate.estimated_constraints.get("junction_temp_c")
+        mv_therm = getattr(ms, "thermal", None) if ms else None
+        if mv_therm and mv_therm.value is not None and mv_therm.status != InformationClass.UNKNOWN:
+            res["thermal"] = mv_therm
+        elif pm.get("thermal") is not None:
+            res["thermal"] = MetricValue(
+                value=float(pm["thermal"]),
+                unit="°C",
+                status=InformationClass.ESTIMATE,
+                source="pareto_metrics",
+                method="analytical_estimate",
+                confidence=0.5,
+            )
+        elif ec.get("junction_temp_c") is not None:
+            res["thermal"] = MetricValue(
+                value=float(ec["junction_temp_c"]),
+                unit="°C",
+                status=InformationClass.ESTIMATE,
+                source="estimated_constraints",
+                method="thermal_model",
+                confidence=0.5,
+            )
+        else:
+            res["thermal"] = MetricValue(unit="°C", status=InformationClass.UNKNOWN)
 
         # Physical size
-        physical_size = pm.get("physical_size")
-        if physical_size is None:
-            physical_size = candidate.estimated_constraints.get("pcb_area_mm2")
+        mv_size = getattr(ms, "physical_size", None) if ms else None
+        if mv_size and mv_size.value is not None and mv_size.status != InformationClass.UNKNOWN:
+            res["physical_size"] = mv_size
+        elif pm.get("physical_size") is not None:
+            res["physical_size"] = MetricValue(
+                value=float(pm["physical_size"]),
+                unit="mm2",
+                status=InformationClass.ESTIMATE,
+                source="pareto_metrics",
+                method="analytical_estimate",
+                confidence=0.5,
+            )
+        elif ec.get("pcb_area_mm2") is not None:
+            res["physical_size"] = MetricValue(
+                value=float(ec["pcb_area_mm2"]),
+                unit="mm2",
+                status=InformationClass.ESTIMATE,
+                source="estimated_constraints",
+                method="geometric_footprint_model",
+                confidence=0.5,
+            )
+        else:
+            res["physical_size"] = MetricValue(unit="mm2", status=InformationClass.UNKNOWN)
 
-        return {
-            "area": float(area) if area is not None else None,
-            "power": float(power) if power is not None else None,
-            "timing": float(timing) if timing is not None else None,
-            "throughput": float(throughput) if throughput is not None else None,
-            "memory": float(memory) if memory is not None else None,
-            "thermal": float(thermal) if thermal is not None else None,
-            "physical_size": float(physical_size) if physical_size is not None else None,
-        }
+        return res
 
     @classmethod
-    def has_complete_metrics(cls, metrics: dict[str, Optional[float]]) -> bool:
-        """Return True if all 7 objectives have measured (non-None) values."""
-        return all(v is not None for v in metrics.values())
+    def extract_metrics(cls, candidate: HardwareArchitectureCandidate) -> dict[str, Optional[float]]:
+        """Extract standardized metric values for Pareto evaluation."""
+        objs = cls.extract_metric_objects(candidate)
+        return {k: mv.value for k, mv in objs.items()}
 
     @classmethod
-    def dominates(cls, metrics_a: dict[str, Optional[float]], metrics_b: dict[str, Optional[float]]) -> bool:
+    def has_complete_metrics(cls, metrics: dict[str, Any]) -> bool:
+        """Return True if all 7 objectives have valid non-None values."""
+        for obj in cls.OBJECTIVES:
+            v = metrics.get(obj)
+            if v is None:
+                return False
+            if isinstance(v, MetricValue):
+                if v.value is None or not v.is_known:
+                    return False
+        return True
+
+    @classmethod
+    def dominates(cls, metrics_a: dict[str, Any], metrics_b: dict[str, Any]) -> bool:
         """Return True if solution A Pareto-dominates solution B across all 7 objectives.
 
-        If either candidate has any None metric, dominance cannot be established.
+        RESEARCH CONTRACT INVARIANTS:
+        - HYPOTHESIS or UNKNOWN metrics CANNOT participate in dominance (returns False).
+        - ESTIMATED CANNOT dominate MEASURED (analytical guesses cannot beat verified data).
+        - MEASURED CAN dominate ESTIMATED.
+        - Missing (None) data cannot establish dominance.
         """
         if not cls.has_complete_metrics(metrics_a) or not cls.has_complete_metrics(metrics_b):
-            return False  # Cannot determine dominance with missing data
+            return False
+
+        vals_a: dict[str, float] = {}
+        vals_b: dict[str, float] = {}
+        has_estimate_a = False
+        has_measured_b = False
+
+        for obj in cls.OBJECTIVES:
+            item_a = metrics_a[obj]
+            item_b = metrics_b[obj]
+
+            if isinstance(item_a, MetricValue):
+                if not item_a.is_usable_for_ranking or item_a.value is None:
+                    return False
+                vals_a[obj] = float(item_a.value)
+                if item_a.status == InformationClass.ESTIMATE:
+                    has_estimate_a = True
+            else:
+                if item_a is None:
+                    return False
+                vals_a[obj] = float(item_a)
+
+            if isinstance(item_b, MetricValue):
+                if not item_b.is_usable_for_ranking or item_b.value is None:
+                    return False
+                vals_b[obj] = float(item_b.value)
+                if item_b.status == InformationClass.MEASUREMENT:
+                    has_measured_b = True
+            else:
+                if item_b is None:
+                    return False
+                vals_b[obj] = float(item_b)
+
+        # Invariant: ESTIMATED cannot dominate MEASURED
+        if has_estimate_a and has_measured_b:
+            return False
 
         at_least_one_strictly_better = False
         for obj, direction in cls.OBJECTIVES.items():
-            val_a = metrics_a[obj]
-            val_b = metrics_b[obj]
+            val_a = vals_a[obj]
+            val_b = vals_b[obj]
 
             if direction == "min":
-                if val_a > val_b:  # A is worse
+                if val_a > val_b:
                     return False
                 if val_a < val_b:
                     at_least_one_strictly_better = True
             else:  # max
-                if val_a < val_b:  # A is worse
+                if val_a < val_b:
                     return False
                 if val_a > val_b:
                     at_least_one_strictly_better = True
@@ -317,18 +509,19 @@ class ParetoFrontier:
         return at_least_one_strictly_better
 
     def add(self, candidate: HardwareArchitectureCandidate) -> bool:
-        """
-        Attempt to add candidate to the Pareto frontier.
-        Candidates with incomplete metrics are tracked separately as UNRANKED.
+        """Attempt to add candidate to the Pareto frontier.
+
+        Candidates with incomplete or HYPOTHESIS metrics cannot enter the frontier
+        and are tracked separately as UNRANKED.
         Returns True if candidate was non-dominated and added to the frontier.
         """
-        cand_metrics = self.extract_metrics(candidate)
+        cand_objs = self.extract_metric_objects(candidate)
 
-        # Candidates with incomplete metrics cannot be Pareto-ranked
-        if not self.has_complete_metrics(cand_metrics):
+        # Candidates with HYPOTHESIS, UNKNOWN, or missing metrics cannot enter Pareto frontier
+        has_hyp = any(mv.status == InformationClass.HYPOTHESIS for mv in cand_objs.values())
+        if has_hyp or not self.has_complete_metrics(cand_objs):
             logger.debug(
-                f"Candidate {candidate.architecture_id} has incomplete metrics "
-                f"({[k for k, v in cand_metrics.items() if v is None]}); tracked as UNRANKED."
+                f"Candidate {candidate.architecture_id} has hypothesis/incomplete metrics; tracked as UNRANKED."
             )
             if candidate not in self.unranked:
                 self.unranked.append(candidate)
@@ -336,15 +529,15 @@ class ParetoFrontier:
 
         # Check if candidate is dominated by any existing member
         for existing in self.frontier:
-            existing_metrics = self.extract_metrics(existing)
-            if self.dominates(existing_metrics, cand_metrics):
+            existing_objs = self.extract_metric_objects(existing)
+            if self.dominates(existing_objs, cand_objs):
                 return False  # Existing candidate is strictly superior
 
         # If we reach here, candidate is NOT dominated. Remove any existing candidates it dominates.
         new_frontier = []
         for existing in self.frontier:
-            existing_metrics = self.extract_metrics(existing)
-            if not self.dominates(cand_metrics, existing_metrics):
+            existing_objs = self.extract_metric_objects(existing)
+            if not self.dominates(cand_objs, existing_objs):
                 new_frontier.append(existing)
 
         new_frontier.append(candidate)
@@ -536,6 +729,15 @@ class CustomChipGenerator:
                 "thermal": target_spec.ambient_temp_c + (est_power_w * target_spec.thermal_resistance_c_per_w),
                 "physical_size": est_package_area_mm2 * 2.2,
             },
+            metrics=MetricSet(
+                area=MetricValue(value=float(total_cells), unit="cells", status=InformationClass.ESTIMATE, source="analytical_scaling_model", method="total_cells_scaling", confidence=0.3),
+                power=MetricValue(value=est_power_w, unit="W", status=InformationClass.ESTIMATE, source="analytical_scaling_model", method="activity_factor_model", confidence=0.3),
+                timing=MetricValue(value=float(pipeline_depth), unit="cycles", status=InformationClass.ESTIMATE, source="analytical_scaling_model", method="pipeline_depth_model", confidence=0.3),
+                throughput=MetricValue(value=18.5 if precision == "INT4" else 12.0, unit="tok/s", status=InformationClass.ESTIMATE, source="analytical_scaling_model", method="macs_per_cycle_model", confidence=0.3),
+                memory=MetricValue(value=target_spec.min_ram_gb, unit="GB", status=InformationClass.ESTIMATE, source="analytical_scaling_model", method="target_spec_minimum", confidence=0.3),
+                thermal=MetricValue(value=target_spec.ambient_temp_c + (est_power_w * target_spec.thermal_resistance_c_per_w), unit="°C", status=InformationClass.ESTIMATE, source="analytical_scaling_model", method="thermal_resistance_model", confidence=0.3),
+                physical_size=MetricValue(value=est_package_area_mm2 * 2.2, unit="mm2", status=InformationClass.ESTIMATE, source="analytical_scaling_model", method="die_package_ratio_model", confidence=0.3),
+            ),
             # TRUTHFULNESS: Cannot claim SYNTHESIS_VALID until real Yosys synthesis succeeds
             verification_level=VerificationLevel.PHYSICALLY_ESTIMATED.value,
             metadata={
@@ -693,10 +895,19 @@ class ArchitectureSearchEngine:
             interface_strategy="pcie_gen3_bridge",
             estimated_resource_requirements={"target_cells": 12000, "estimated_latency_cycles": 4},
             estimated_constraints={"power_w": 6.8, "pcb_area_mm2": 2800.0, "tokens_per_sec": 14.0, "ram_gb": 8.0},
-            reward=0.60,
+            reward=0.0,  # TRUTHFULNESS: Reward must come from actual evaluation, not pre-assigned
             is_hypothesis=True,
             validation_status="UNVERIFIED",
             pareto_metrics={"area": 12000.0, "power": 6.8, "timing": 4.0, "throughput": 14.0, "memory": 8.0, "thermal": 72.0, "physical_size": 2800.0},
+            metrics=MetricSet(
+                area=MetricValue(value=12000.0, unit="cells", status=InformationClass.HYPOTHESIS, source="llm_proposal", method="seed_hypothesis", confidence=0.1),
+                power=MetricValue(value=6.8, unit="W", status=InformationClass.HYPOTHESIS, source="llm_proposal", method="seed_hypothesis", confidence=0.1),
+                timing=MetricValue(value=4.0, unit="cycles", status=InformationClass.HYPOTHESIS, source="llm_proposal", method="seed_hypothesis", confidence=0.1),
+                throughput=MetricValue(value=14.0, unit="tok/s", status=InformationClass.HYPOTHESIS, source="llm_proposal", method="seed_hypothesis", confidence=0.1),
+                memory=MetricValue(value=8.0, unit="GB", status=InformationClass.HYPOTHESIS, source="llm_proposal", method="seed_hypothesis", confidence=0.1),
+                thermal=MetricValue(value=72.0, unit="°C", status=InformationClass.HYPOTHESIS, source="llm_proposal", method="seed_hypothesis", confidence=0.1),
+                physical_size=MetricValue(value=2800.0, unit="mm2", status=InformationClass.HYPOTHESIS, source="llm_proposal", method="seed_hypothesis", confidence=0.1),
+            ),
         )
         self.genealogy.register_candidate(c1, mutation_type="initial_commercial_npu")
         self.pareto_frontier.add(c1)
@@ -718,10 +929,19 @@ class ArchitectureSearchEngine:
             interface_strategy="axis_streaming",
             estimated_resource_requirements={"target_cells": 3800, "estimated_latency_cycles": 2},
             estimated_constraints={"power_w": 2.2, "pcb_area_mm2": 1100.0, "tokens_per_sec": 18.0, "ram_gb": 8.0},
-            reward=0.82,
+            reward=0.0,  # TRUTHFULNESS: Reward must come from actual evaluation, not pre-assigned
             is_hypothesis=True,
             validation_status="UNVERIFIED",
             pareto_metrics={"area": 3800.0, "power": 2.2, "timing": 2.0, "throughput": 18.0, "memory": 8.0, "thermal": 52.0, "physical_size": 1100.0},
+            metrics=MetricSet(
+                area=MetricValue(value=3800.0, unit="cells", status=InformationClass.HYPOTHESIS, source="llm_proposal", method="seed_hypothesis", confidence=0.1),
+                power=MetricValue(value=2.2, unit="W", status=InformationClass.HYPOTHESIS, source="llm_proposal", method="seed_hypothesis", confidence=0.1),
+                timing=MetricValue(value=2.0, unit="cycles", status=InformationClass.HYPOTHESIS, source="llm_proposal", method="seed_hypothesis", confidence=0.1),
+                throughput=MetricValue(value=18.0, unit="tok/s", status=InformationClass.HYPOTHESIS, source="llm_proposal", method="seed_hypothesis", confidence=0.1),
+                memory=MetricValue(value=8.0, unit="GB", status=InformationClass.HYPOTHESIS, source="llm_proposal", method="seed_hypothesis", confidence=0.1),
+                thermal=MetricValue(value=52.0, unit="°C", status=InformationClass.HYPOTHESIS, source="llm_proposal", method="seed_hypothesis", confidence=0.1),
+                physical_size=MetricValue(value=1100.0, unit="mm2", status=InformationClass.HYPOTHESIS, source="llm_proposal", method="seed_hypothesis", confidence=0.1),
+            ),
         )
         self.genealogy.register_candidate(c2, mutation_type="initial_systolic_sram")
         self.pareto_frontier.add(c2)
@@ -743,10 +963,19 @@ class ArchitectureSearchEngine:
             interface_strategy="streaming",
             estimated_resource_requirements={"target_cells": 6200, "estimated_latency_cycles": 1},
             estimated_constraints={"power_w": 4.1, "pcb_area_mm2": 1600.0, "tokens_per_sec": 16.5, "ram_gb": 8.0},
-            reward=0.74,
+            reward=0.0,  # TRUTHFULNESS: Reward must come from actual evaluation, not pre-assigned
             is_hypothesis=True,
             validation_status="UNVERIFIED",
             pareto_metrics={"area": 6200.0, "power": 4.1, "timing": 1.0, "throughput": 16.5, "memory": 8.0, "thermal": 64.0, "physical_size": 1600.0},
+            metrics=MetricSet(
+                area=MetricValue(value=6200.0, unit="cells", status=InformationClass.HYPOTHESIS, source="llm_proposal", method="seed_hypothesis", confidence=0.1),
+                power=MetricValue(value=4.1, unit="W", status=InformationClass.HYPOTHESIS, source="llm_proposal", method="seed_hypothesis", confidence=0.1),
+                timing=MetricValue(value=1.0, unit="cycles", status=InformationClass.HYPOTHESIS, source="llm_proposal", method="seed_hypothesis", confidence=0.1),
+                throughput=MetricValue(value=16.5, unit="tok/s", status=InformationClass.HYPOTHESIS, source="llm_proposal", method="seed_hypothesis", confidence=0.1),
+                memory=MetricValue(value=8.0, unit="GB", status=InformationClass.HYPOTHESIS, source="llm_proposal", method="seed_hypothesis", confidence=0.1),
+                thermal=MetricValue(value=64.0, unit="°C", status=InformationClass.HYPOTHESIS, source="llm_proposal", method="seed_hypothesis", confidence=0.1),
+                physical_size=MetricValue(value=1600.0, unit="mm2", status=InformationClass.HYPOTHESIS, source="llm_proposal", method="seed_hypothesis", confidence=0.1),
+            ),
         )
         self.genealogy.register_candidate(c3, mutation_type="initial_simd_vector")
         self.pareto_frontier.add(c3)
@@ -805,16 +1034,17 @@ class ArchitectureSearchEngine:
             interface_strategy=candidate.interface_strategy,
             rtl_implementation=candidate.rtl_implementation,
             estimated_resource_requirements=dict(candidate.estimated_resource_requirements),
-            actual_synthesis_metrics=dict(candidate.actual_synthesis_metrics),
+            actual_synthesis_metrics={},  # TRUTHFULNESS: Mutated child has not been synthesized
             estimated_constraints=dict(candidate.estimated_constraints),
-            measured_constraints=dict(candidate.measured_constraints),
+            measured_constraints={},      # TRUTHFULNESS: Mutated child has not been measured
             verification_status="unverified",
-            reward=candidate.reward,
+            reward=0.0,                   # TRUTHFULNESS: Reward must come from actual evaluation
             is_hypothesis=True,
             validation_status="UNVERIFIED",
             custom_chip=candidate.custom_chip,
             chip_generation=candidate.chip_generation,
             pareto_metrics=dict(candidate.pareto_metrics),
+            metrics=MetricSet(),
             metadata=dict(candidate.metadata),
         )
 
@@ -923,6 +1153,19 @@ class ArchitectureSearchEngine:
         else:  # Generic MUTATE
             child.pipeline_depth = max(1, child.pipeline_depth)
             child.architecture_description += f" [MUTATED: {op_str}]"
+
+        # TRUTHFULNESS: Mutated candidate is a hypothesis until empirically verified.
+        # Tag all metric values as HYPOTHESIS with low initial confidence.
+        for k, v in child.pareto_metrics.items():
+            if v is not None:
+                child.metrics.set_metric(
+                    k,
+                    float(v),
+                    status=InformationClass.HYPOTHESIS,
+                    source="mutation_hypothesis",
+                    method=op_str,
+                    confidence=0.1,
+                )
 
         if register_genealogy:
             self.genealogy.register_candidate(
@@ -1074,8 +1317,22 @@ class ArchitectureSearchEngine:
             if actual_cells and actual_cells > 0:
                 score += 50.0 / actual_cells
             else:
-                # No actual synthesis data: penalize unknown metrics
                 score -= 0.5
+
+            # InformationClass provenance weighting across all objectives
+            ms = getattr(c, "metrics", None)
+            if ms:
+                for attr in ("area", "power", "timing", "throughput", "memory", "thermal", "physical_size"):
+                    mv = getattr(ms, attr, None)
+                    if mv is not None:
+                        if mv.status == InformationClass.MEASUREMENT:
+                            score += 0.5   # Verified EDA measurement bonus
+                        elif mv.status == InformationClass.ESTIMATE:
+                            score += 0.1   # Plausible analytical estimate
+                        elif mv.status == InformationClass.HYPOTHESIS:
+                            score -= 0.3   # LLM/mutation hypothesis discount
+                        else:  # UNKNOWN
+                            score -= 0.5   # Missing data penalty
 
             # Penalize candidates with many unknown constraint states
             unknown_count = sum(1 for v in c.constraint_states.values() if v == "UNKNOWN")

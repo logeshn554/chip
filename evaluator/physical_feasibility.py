@@ -20,6 +20,7 @@ from agent.schemas import (
     ComponentEvidence,
     ConstraintState,
     FeasibilityLabel,
+    InformationClass,
     TargetSpecification,
 )
 
@@ -344,8 +345,25 @@ class PhysicalFeasibilityEngine:
             feasibility = FeasibilityLabel.UNKNOWN
             rec = "Unknown physical constraint parameters."
         else:
-            feasibility = FeasibilityLabel.FEASIBLE_ESTIMATE
-            rec = "Candidate satisfies all declared physical, electrical, and performance envelope constraints."
+            # Check if any input metrics were HYPOTHESIS data
+            # If so, label as FEASIBLE_HYPOTHESIS rather than FEASIBLE_ESTIMATE.
+            ms = getattr(candidate, "metrics", None)
+            has_hyp = False
+            if ms:
+                for attr in ("power", "physical_size", "thermal", "throughput", "memory"):
+                    mv = getattr(ms, attr, None)
+                    if mv and mv.status == InformationClass.HYPOTHESIS:
+                        has_hyp = True
+                        break
+            elif getattr(candidate, "is_hypothesis", False):
+                has_hyp = True
+
+            if has_hyp:
+                feasibility = FeasibilityLabel.FEASIBLE_HYPOTHESIS
+                rec = "Candidate satisfies envelope under HYPOTHESIS data only; empirical tool verification required."
+            else:
+                feasibility = FeasibilityLabel.FEASIBLE_ESTIMATE
+                rec = "Candidate satisfies all declared physical, electrical, and performance envelope constraints."
 
         return PhysicalFeasibilityReport(
             feasibility=feasibility,

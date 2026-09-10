@@ -279,6 +279,169 @@ class EvaluationResult:
     timestamp: float = field(default_factory=time.time)
 
 
+class InformationClass(str, Enum):
+    """Three-class research contract for hardware metric truthfulness.
+
+    INVARIANTS enforced throughout the system:
+        HYPOTHESIS != MEASUREMENT  (LLM claims are never treated as measured)
+        ESTIMATE != MEASUREMENT    (analytical models are never treated as measured)
+        UNKNOWN != PASS            (missing data never satisfies constraints)
+
+    Determines whether a metric can participate in:
+        - Reward computation (MEASUREMENT only in TRAINING mode)
+        - Pareto frontier ranking (MEASUREMENT or ESTIMATE, never HYPOTHESIS)
+        - Training data generation (MEASUREMENT only)
+        - Search direction heuristics (any class, with appropriate discounting)
+    """
+    HYPOTHESIS = "HYPOTHESIS"       # LLM-generated claim; NOT verified by any tool
+    ESTIMATE = "ESTIMATE"           # Analytical model with stated assumptions
+    MEASUREMENT = "MEASUREMENT"     # From real EDA tool output (Yosys, Verilator, etc.)
+    UNKNOWN = "UNKNOWN"             # Not yet evaluated
+
+
+@dataclass
+class MetricValue:
+    """Standard metric object with full provenance tracking.
+
+    Every hardware metric in the system (area, power, timing, throughput, etc.)
+    must be wrapped in a MetricValue so that downstream consumers always know:
+    - What the value is and its unit
+    - Whether it's a hypothesis, estimate, or measurement
+    - Where it came from and how confident we are
+    - What evidence supports it
+    """
+    value: Optional[float] = None
+    unit: str = ""                  # e.g., "cells", "W", "mm2", "ns", "tok/s", "GB", "°C"
+    status: InformationClass = InformationClass.UNKNOWN
+    source: str = "unknown"         # e.g., "yosys_synthesis", "analytical_model", "llm_proposal"
+    method: str = "unknown"         # e.g., "actual_cell_count", "analytical_scaling_model"
+    confidence: float = 0.0         # 0.0 (no confidence) to 1.0 (calibrated tool measurement)
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    tool_version: str = ""          # e.g., "yosys-0.40", "verilator-5.024"
+    evidence: str = ""              # Textual justification, raw log excerpt, or datasheet reference
+
+    @property
+    def is_measured(self) -> bool:
+        return self.status == InformationClass.MEASUREMENT
+
+    @property
+    def is_usable_for_ranking(self) -> bool:
+        """ESTIMATE and MEASUREMENT can participate in Pareto ranking. HYPOTHESIS cannot."""
+        return self.status in (InformationClass.ESTIMATE, InformationClass.MEASUREMENT)
+
+    @property
+    def is_usable_for_training(self) -> bool:
+        """Only MEASUREMENT-class metrics can enter RL training data."""
+        return self.status == InformationClass.MEASUREMENT
+
+    @property
+    def is_known(self) -> bool:
+        return self.value is not None and self.status != InformationClass.UNKNOWN
+
+
+@dataclass
+class MetricSet:
+    """Typed container for the 7 canonical hardware design objectives.
+
+    Replaces raw dicts (pareto_metrics, estimated_constraints) as the
+    single source of truth for candidate metrics. Each field carries
+    full provenance via MetricValue.
+    """
+    area: MetricValue = field(default_factory=MetricValue)           # cells or mm2
+    power: MetricValue = field(default_factory=MetricValue)          # W
+    timing: MetricValue = field(default_factory=MetricValue)         # ns or cycles
+    throughput: MetricValue = field(default_factory=MetricValue)     # tok/s or TOPS
+    memory: MetricValue = field(default_factory=MetricValue)         # GB
+    thermal: MetricValue = field(default_factory=MetricValue)        # °C
+    physical_size: MetricValue = field(default_factory=MetricValue)  # mm2
+
+    def to_dict(self) -> dict[str, Optional[float]]:
+        """Return {name: value} dict for backward compatibility."""
+        return {
+            "area": self.area.value,
+            "power": self.power.value,
+            "timing": self.timing.value,
+            "throughput": self.throughput.value,
+            "memory": self.memory.value,
+            "thermal": self.thermal.value,
+            "physical_size": self.physical_size.value,
+        }
+
+    def all_measured(self) -> bool:
+        """True if every metric has MEASUREMENT status with a non-None value."""
+        for mv in [self.area, self.power, self.timing, self.throughput,
+                    self.memory, self.thermal, self.physical_size]:
+            if not mv.is_measured or mv.value is None:
+                return False
+        return True
+
+    def all_rankable(self) -> bool:
+        """True if every metric is at least ESTIMATE with a non-None value."""
+        for mv in [self.area, self.power, self.timing, self.throughput,
+                    self.memory, self.thermal, self.physical_size]:
+            if not mv.is_usable_for_ranking or mv.value is None:
+                return False
+        return True
+
+    def has_any_known(self) -> bool:
+        """True if at least one metric is known."""
+        for mv in [self.area, self.power, self.timing, self.throughput,
+                    self.memory, self.thermal, self.physical_size]:
+            if mv.is_known:
+                return True
+        return False
+
+    def get_field(self, name: str) -> MetricValue:
+        """Get a MetricValue by objective name."""
+        return getattr(self, name, MetricValue())
+
+    def set_metric(
+        self,
+        name: str,
+        value: Optional[float],
+        unit: str = "",
+        status: InformationClass = InformationClass.UNKNOWN,
+        source: str = "unknown",
+        method: str = "unknown",
+        confidence: float = 0.0,
+        tool_version: str = "",
+        evidence: str = "",
+    ) -> None:
+        """Set a metric with full provenance tracking."""
+        if hasattr(self, name):
+            setattr(self, name, MetricValue(
+                value=value,
+                unit=unit,
+                status=status,
+                source=source,
+                method=method,
+                confidence=confidence,
+                tool_version=tool_version,
+                evidence=evidence,
+            ))
+
+
+# ── Deprecated Aliases (backward compatibility) ──────────────────────
+class MetricStatus(str, Enum):
+    """DEPRECATED: Use InformationClass instead."""
+    MEASURED = "MEASURED"
+    ESTIMATED = "ESTIMATED"
+    UNKNOWN = "UNKNOWN"
+    PLACEHOLDER_DO_NOT_USE = "PLACEHOLDER_DO_NOT_USE"
+
+
+@dataclass
+class MetricProvenance:
+    """DEPRECATED: Use MetricValue instead."""
+    value: Optional[float] = None
+    source: str = "unknown"
+    method: str = "unknown"
+    confidence: float = 0.0
+    status: MetricStatus = MetricStatus.UNKNOWN
+    tool_version: str = ""
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
 # ── Architecture Search ──────────────────────────────────────────────
 
 @dataclass
@@ -318,8 +481,31 @@ class HardwareArchitectureCandidate:
     rejection_reasons: list[str] = field(default_factory=list)
     constraint_states: dict[str, str] = field(default_factory=dict)
     pareto_metrics: dict[str, float] = field(default_factory=dict)
+    # Canonical metric store with full provenance (MetricSet).
+    # Source of truth for Pareto ranking, reward, and training data.
+    metrics: MetricSet = field(default_factory=MetricSet)
     verification_level: str = "SIMULATION_VALID"
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.metrics is None:
+            self.metrics = MetricSet()
+        # Backward compatibility: populate metrics from pareto_metrics if metrics has defaults and pareto_metrics has values
+        if self.pareto_metrics and not self.metrics.has_any_known():
+            for k, v in self.pareto_metrics.items():
+                if v is not None and hasattr(self.metrics, k):
+                    setattr(self.metrics, k, MetricValue(
+                        value=float(v),
+                        status=InformationClass.ESTIMATE,
+                        source="legacy_pareto_metrics",
+                        method="legacy_dict",
+                        confidence=0.5,
+                    ))
+        # Keep pareto_metrics synchronized with metrics for legacy callers reading pareto_metrics
+        for attr in ("area", "power", "timing", "throughput", "memory", "thermal", "physical_size"):
+            mv = getattr(self.metrics, attr, None)
+            if mv and mv.value is not None and attr not in self.pareto_metrics:
+                self.pareto_metrics[attr] = mv.value
 
     @property
     def datapath(self) -> str:
@@ -505,6 +691,7 @@ class ConstraintState(str, Enum):
 class FeasibilityLabel(str, Enum):
     """Engineering label for component and physical fit feasibility."""
     FEASIBLE_ESTIMATE = "FEASIBLE_ESTIMATE"
+    FEASIBLE_HYPOTHESIS = "FEASIBLE_HYPOTHESIS"  # Passed feasibility using HYPOTHESIS data only
     INFEASIBLE_ESTIMATE = "INFEASIBLE_ESTIMATE"
     UNKNOWN = "UNKNOWN"
 
@@ -518,34 +705,6 @@ class VerificationLevel(str, Enum):
     REAL_WORLD_COMPONENT_VERIFIED = "REAL_WORLD_COMPONENT_VERIFIED"
     SILICON_VERIFIED = "SILICON_VERIFIED"
 
-
-class MetricStatus(str, Enum):
-    """Truthfulness status for any hardware metric value.
-
-    Determines whether the metric can be used for reward computation,
-    Pareto ranking, and training data.
-    """
-    MEASURED = "MEASURED"                          # From real EDA tool output (Yosys, Verilator, etc.)
-    ESTIMATED = "ESTIMATED"                        # From analytical model with stated assumptions
-    UNKNOWN = "UNKNOWN"                            # Not yet evaluated
-    PLACEHOLDER_DO_NOT_USE = "PLACEHOLDER_DO_NOT_USE"  # Fabricated default; must not enter reward or ranking
-
-
-@dataclass
-class MetricProvenance:
-    """Tracks the source, method, and confidence of a hardware metric value.
-
-    Every metric in the system must be accompanied by provenance to prevent
-    fabricated or estimated values from contaminating reward signals and
-    Pareto frontier rankings.
-    """
-    value: Optional[float] = None
-    source: str = "unknown"         # e.g., "yosys_synthesis", "analytical_model", "manufacturer_datasheet"
-    method: str = "unknown"         # e.g., "actual_cell_count", "analytical_scaling_model", "regex_heuristic"
-    confidence: float = 0.0         # 0.0 (no confidence) to 1.0 (measured by calibrated tool)
-    status: MetricStatus = MetricStatus.UNKNOWN
-    tool_version: str = ""          # e.g., "yosys-0.40", "verilator-5.024"
-    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
 # ── Real-World Component Evidence ────────────────────────────────────

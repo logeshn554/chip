@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 import logging
 from typing import Any, Optional
 
+from agent.schemas import InformationClass
+
 logger = logging.getLogger(__name__)
 
 
@@ -155,13 +157,19 @@ class RewardEngine:
         timing_target: float = 5.0,
         power_uw: Optional[float] = None,
         evaluation_mode: str = "FAST_DEVELOPMENT",  # "FAST_DEVELOPMENT" | "STRICT_EVALUATION" | "TRAINING" | "research_fast" | "research_strict"
+        metric_statuses: Optional[dict[str, Any]] = None,
     ) -> GroundedRewardResult:
         """Modular multi-objective reward with normalized weights and strict hard gates.
+
+        RESEARCH CONTRACT INVARIANTS:
+        - HYPOTHESIS != MEASUREMENT (LLM claims cannot earn synthesis reward in TRAINING mode).
+        - ESTIMATE != MEASUREMENT (analytical models cannot substitute for real EDA in strict mode).
+        - UNKNOWN != PASS (missing data cannot pass hard gates).
 
         Modes:
         - 'FAST_DEVELOPMENT' / 'research_fast': Formal and synthesis are optional; unavailable tools re-normalize weights.
         - 'STRICT_EVALUATION' / 'TRAINING' / 'research_strict': Formal and real logic synthesis are mandatory;
-          skipped/unavailable tools fail strict gates and cannot obtain high reward.
+          HYPOTHESIS/UNKNOWN metrics fail strict gates and cannot enter RL training.
         """
         mode_upper = str(evaluation_mode).upper().strip()
         is_strict = mode_upper in ("STRICT_EVALUATION", "TRAINING", "RESEARCH_STRICT")
@@ -238,6 +246,27 @@ class RewardEngine:
                 },
             )
 
+        # Strict Mode Gate: Provenance check - reject HYPOTHESIS / UNKNOWN in TRAINING mode
+        if is_strict and metric_statuses:
+            area_st = metric_statuses.get("area")
+            if area_st is not None:
+                area_st_str = getattr(area_st, "value", str(area_st)).upper()
+                if area_st_str in ("HYPOTHESIS", "UNKNOWN", "PLACEHOLDER_DO_NOT_USE"):
+                    return GroundedRewardResult(
+                        compile_score=1.0,
+                        functional_score=4.0,
+                        synthesis_score=0.0,
+                        lint_score=1.0,
+                        formal_score=1.0 if formal_status == "PASS" else 0.0,
+                        total_reward=0.4,
+                        normalized_reward=0.4,
+                        is_valid_hardware=False,
+                        breakdown={
+                            "evaluation_mode": evaluation_mode,
+                            "gate_failed": f"Area metric status was '{area_st_str}'. HYPOTHESIS/UNKNOWN metrics are strictly rejected in {evaluation_mode} mode.",
+                        },
+                    )
+
         # Formal verification score
         if formal_status == "PASS":
             r_formal = 1.0
@@ -257,6 +286,7 @@ class RewardEngine:
                     "gate_failed": "Formal assertion violation detected by SymbiYosys.",
                 },
             )
+
         # Multi-objective active metric weight re-normalization:
         # Never award free 1.0 points to unmeasured/unavailable metrics.
         # Instead, dynamically re-distribute weights strictly across measured objectives.
@@ -272,22 +302,36 @@ class RewardEngine:
         else:
             r_formal = 0.0  # SKIPPED or UNAVAILABLE: not active, weight redistributed
 
-        # 3. Area (Active only if synthesized cell count or area was measured)
-        if area is not None and area > 0:
+        # Helper to check if metric is usable
+        def _is_usable_metric(name: str) -> bool:
+            if not metric_statuses:
+                return True
+            st = metric_statuses.get(name)
+            if st is None:
+                return True
+            st_str = getattr(st, "value", str(st)).upper()
+            # In strict mode, only MEASUREMENT is allowed
+            if is_strict:
+                return st_str == "MEASUREMENT"
+            # In non-strict mode, HYPOTHESIS and UNKNOWN are excluded
+            return st_str not in ("HYPOTHESIS", "UNKNOWN", "PLACEHOLDER_DO_NOT_USE")
+
+        # 3. Area (Active only if synthesized cell count or area was measured/usable)
+        if area is not None and area > 0 and _is_usable_metric("area"):
             r_area = max(0.0, min(1.0, area_target / area))
             active_objectives["area"] = (self.w_area, r_area)
         else:
             r_area = 0.0
 
-        # 4. Timing (Active only if critical path was measured)
-        if timing_ns is not None and timing_ns > 0:
+        # 4. Timing (Active only if critical path was measured/usable)
+        if timing_ns is not None and timing_ns > 0 and _is_usable_metric("timing"):
             r_timing = max(0.0, min(1.0, timing_target / timing_ns))
             active_objectives["timing"] = (self.w_timing, r_timing)
         else:
             r_timing = 0.0
 
-        # 5. Power (Active only if power was reliably measured/estimated)
-        if power_uw is not None and power_uw > 0:
+        # 5. Power (Active only if power was reliably measured/estimated/usable)
+        if power_uw is not None and power_uw > 0 and _is_usable_metric("power"):
             power_target = 1000.0
             r_power = max(0.0, min(1.0, power_target / power_uw))
             active_objectives["power"] = (self.w_power, r_power)
