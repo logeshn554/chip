@@ -199,11 +199,22 @@ class VerilatorTool:
         if self._has_binary:
             cmd = [self.binary, "--lint-only", "-Wall", str(file_path)]
             try:
-                proc = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        *cmd,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                except OSError as ose:
+                    if getattr(ose, "winerror", None) == 193 or "193" in str(ose):
+                        cmd_wrapper = ["cmd.exe", "/c", self.binary, "--lint-only", "-Wall", str(file_path)]
+                        proc = await asyncio.create_subprocess_exec(
+                            *cmd_wrapper,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE,
+                        )
+                    else:
+                        raise
                 stdout, stderr = await proc.communicate()
                 output = (stdout + stderr).decode("utf-8", errors="replace")
                 if proc.returncode != 0:
