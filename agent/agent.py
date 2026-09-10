@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import sys
+from dataclasses import asdict
 from typing import Any, Optional
 
 from agent.state import AgentState
@@ -74,8 +75,10 @@ class HardwareAgent:
         self.yosys_tool = YosysTool(work_dir=os.path.join(work_dir, "synth"))
         self.git_tool = GitTool()
 
-        # Planner & Reward Engine
+        # Planner, Architecture Search & Reward Engine
+        from agent.architecture_search import ArchitectureSearchEngine
         self.planner = HardwarePlanner(self.llm)
+        self.arch_engine = ArchitectureSearchEngine()
         self.reward_engine = RewardEngine()
 
     def _log_observability(self, event_type: str, data: dict[str, Any]) -> None:
@@ -117,6 +120,24 @@ class HardwareAgent:
                         state.relevant_memory.append(f"[{m.get('title', 'Doc')}]: {m['content']}")
             state.add_step(action, "success", {"query": query, "memory_type": mem_type})
             return res
+
+        elif action == "PROPOSE_ARCHITECTURE":
+            n = int(params.get("n", 4))
+            cands = self.arch_engine.propose_candidates(
+                task_id=state.task[:20].replace(" ", "_"),
+                task_description=state.task,
+                n=n,
+            )
+            cand_summaries = [f"{c.architecture_id}: {c.datapath_structure} (pipe={c.pipeline_depth})" for c in cands]
+            state.add_step(action, "proposed", {"candidates": cand_summaries})
+            self._log_observability("proposed_architectures", {"count": len(cands), "candidates": cand_summaries})
+            return {"status": "success", "candidates": [asdict(c) for c in cands]}
+
+        elif action == "COMPARE_ARCHITECTURES":
+            cands = list(self.arch_engine.genealogy.candidates.values())[-4:]
+            ranked = self.arch_engine.rank_candidates(cands)
+            state.add_step(action, "compared", {"top_candidate": ranked[0].architecture_id if ranked else "none"})
+            return {"status": "success", "ranked": [asdict(c) for c in ranked]}
 
         elif action == "CREATE_RTL" or action == "EDIT_RTL":
             filename = params.get("filename", state.active_filename)

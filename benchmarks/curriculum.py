@@ -38,6 +38,7 @@ class BenchmarkTask:
     formal_properties: str = ""  # Separate SystemVerilog formal property specification
     target_cells: Optional[float] = None
     target_timing_ns: Optional[float] = None
+    implemented: bool = True
 
     @property
     def task_id(self) -> str:
@@ -503,13 +504,76 @@ endmodule
             formal_properties="always @(posedge clk) if (!rst_n) assert property (act_out == '0 && psum_out == '0); else if (load_weight) assert property (weight_reg == weight_in);",
         ))
 
+        # ─────────────────────────────────────────────────────────────
+        # FUTURE ROADMAP (Conceptual, Not Implemented)
+        # ─────────────────────────────────────────────────────────────
+        self._register(BenchmarkTask(
+            id="L8_TRANSFORMER_ATTN_BLOCK",
+            level=8,
+            name="Transformer Attention Compute Engine",
+            description="[Conceptual Roadmap] Scaled dot-product attention compute engine accelerating QK^T matrix multiplication and Softmax scaling.",
+            top_module="attn_engine",
+            verification_criteria=["Matrix transpose & dot-product", "Softmax exponentiation datapath", "Fixed-point Q8.8 scaling"],
+            reference_rtl="// Conceptual: pending full reference implementation\nmodule attn_engine; endmodule",
+            implemented=False,
+            target_cells=1200.0,
+            target_timing_ns=4.0,
+        ))
+
+        self._register(BenchmarkTask(
+            id="L9_AI_ACCELERATOR_SUBSYSTEM",
+            level=9,
+            name="Integrated AI Accelerator Subsystem",
+            description="[Conceptual Roadmap] Heterogeneous accelerator subsystem coupling 2D systolic array, double-buffered scratchpad SRAM, and AXI4-Stream DMA controller.",
+            top_module="ai_accelerator_subsystem",
+            verification_criteria=["AXI4-Stream slave/master interface", "SRAM double-buffering bank arbitration", "Continuous systolic execution without pipeline stalls"],
+            reference_rtl="// Conceptual: pending full reference implementation\nmodule ai_accelerator_subsystem; endmodule",
+            implemented=False,
+            target_cells=3500.0,
+            target_timing_ns=3.5,
+        ))
+
+        self._register(BenchmarkTask(
+            id="L10_PORTABLE_AI_COMPUTER_SUBSYSTEM",
+            level=10,
+            name="Portable Independent AI Computer Subsystem",
+            description="[Conceptual Roadmap] Complete SoC subsystem: RV32I host CPU, AI matrix accelerator, unified memory controller, USB-C interface, and power management block.",
+            top_module="ai_computer_soc",
+            verification_criteria=["Host CPU booting and command dispatch", "Direct memory access between RAM and AI engine", "Autonomous battery power throttling"],
+            reference_rtl="// Conceptual: pending full reference implementation\nmodule ai_computer_soc; endmodule",
+            implemented=False,
+            target_cells=10000.0,
+            target_timing_ns=3.0,
+        ))
+
     def _register(self, task: BenchmarkTask):
         if task.target_cells is None:
-            defaults = {1: 10.0, 2: 50.0, 3: 150.0, 4: 400.0, 5: 300.0, 6: 350.0, 7: 500.0}
+            defaults = {1: 10.0, 2: 50.0, 3: 150.0, 4: 400.0, 5: 300.0, 6: 350.0, 7: 500.0, 8: 1200.0, 9: 3500.0, 10: 10000.0}
             task.target_cells = defaults.get(task.level, 100.0)
         if task.target_timing_ns is None:
             task.target_timing_ns = 5.0
         self._tasks[task.id] = task
+
+    def get_implemented_tasks(self, level: Optional[int] = None) -> list[BenchmarkTask]:
+        """Return only fully implemented and verified benchmark tasks."""
+        if level is not None:
+            return [t for t in self._tasks.values() if t.level == level and t.implemented]
+        return [t for t in self._tasks.values() if t.implemented]
+
+    def adjust_difficulty(self, current_level: int, success_rate: float, recent_failures: int = 0, threshold: float = 0.80) -> int:
+        """Empirically adjust curriculum difficulty based on measured agent performance.
+        
+        - If success_rate >= threshold and current_level < 7: advance to next level.
+        - If recent_failures >= 3 or success_rate < 0.25 and current_level > 1: return to previous level.
+        - Otherwise: remain at current level.
+        """
+        if success_rate >= threshold and current_level < 7:
+            next_lvl = current_level + 1
+            return next_lvl
+        elif (recent_failures >= 3 or success_rate < 0.25) and current_level > 1:
+            prev_lvl = current_level - 1
+            return prev_lvl
+        return current_level
 
 
 _CURRICULUM_INSTANCE = BenchmarkCurriculum()

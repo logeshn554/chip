@@ -138,6 +138,8 @@ class YosysTool:
                 "error": f"File not found: {file_path}",
                 "file": file_path,
                 "line": None,
+                "cells": None,
+                "estimated_area": None,
             }
 
         with open(resolved_path, "r", encoding="utf-8", errors="replace") as f:
@@ -221,6 +223,8 @@ class YosysTool:
                 "error": "Yosys binary not available and heuristic fallback disabled.",
                 "file": resolved_path,
                 "line": None,
+                "cells": None,
+                "estimated_area": None,
             }
 
         return self.analyze_synthesizability(code, top_module=top_module)

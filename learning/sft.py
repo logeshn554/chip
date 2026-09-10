@@ -74,17 +74,27 @@ class SFTTrainer:
 
         Requires: trl, peft, datasets, bitsandbytes
         """
+        import torch
         from datasets import load_dataset
         from peft import LoraConfig, TaskType, get_peft_model
         from transformers import AutoModelForCausalLM, AutoTokenizer
         from trl import SFTTrainer as TRLSFTTrainer, SFTConfig
 
-        # Load model with quantization
+        has_cuda = torch.cuda.is_available()
+        has_hip = getattr(torch.version, "hip", None) is not None
+        use_fp16 = bool(has_cuda or has_hip)
+        device_map = "auto" if (has_cuda or has_hip) else None
+
+        # Load model with device awareness
         tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+        model_kwargs = {}
+        if device_map:
+            model_kwargs["device_map"] = device_map
+            model_kwargs["torch_dtype"] = "auto"
+
         model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
-            torch_dtype="auto",
-            device_map="auto",
+            **model_kwargs,
         )
 
         # Configure LoRA
@@ -102,11 +112,7 @@ class SFTTrainer:
         # Load dataset
         dataset = load_dataset("json", data_files=dataset_path, split="train")
 
-        # Format for SFT
-        def format_example(example):
-            return f"### Instruction:\n{example['instruction']}\n\n### Response:\n{example['response']}"
-
-        # Training config
+        # Training config with device-aware precision
         training_config = SFTConfig(
             output_dir=self.output_dir,
             num_train_epochs=self.num_epochs,
@@ -115,7 +121,7 @@ class SFTTrainer:
             logging_steps=10,
             save_steps=100,
             save_total_limit=3,
-            fp16=True,
+            fp16=use_fp16,
             gradient_accumulation_steps=4,
         )
 

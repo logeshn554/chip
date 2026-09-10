@@ -33,17 +33,42 @@ class Experience:
     """Record of an attempt, failure, correction, and outcome."""
     task: str
     attempted_solution: str
-    error: str
-    correction: str
-    result: str  # "passed", "failed"
+    error: str = ""
+    correction: str = ""
+    result: str = "passed"  # "passed", "failed"
     reward: float = 0.0
     tool_sequence: list[str] = field(default_factory=list)
     error_category: str = "GENERAL"  # "SYNTAX_LINT", "FUNCTIONAL_ASSERT", "SYNTHESIS_ERROR", "FORMAL_FAIL"
     error_signature: str = ""
+    # Enhanced structured fields for self-evolution memory
+    failure_type: str = ""
+    tool: str = ""
+    error_message: str = ""
+    context: str = ""
+    root_cause: str = ""
+    fix: str = ""
+    task_family: str = ""
+    architecture_family: str = ""
+    source_trajectory: str = ""
+    confidence: float = 1.0
     id: str = ""
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def __post_init__(self):
+        # Harmonize aliased and legacy field names
+        if not self.failure_type:
+            self.failure_type = self.error_category or "GENERAL"
+        if not self.error_category:
+            self.error_category = self.failure_type
+        if not self.error_message:
+            self.error_message = self.error
+        if not self.error:
+            self.error = self.error_message
+        if not self.fix:
+            self.fix = self.correction
+        if not self.correction:
+            self.correction = self.fix
+
         if not self.id:
             h = abs(hash(self.task + self.error + self.correction)) % 1000000
             self.id = f"exp_{h:06d}"
@@ -51,11 +76,15 @@ class Experience:
     def to_embedding_text(self) -> str:
         """Text used for embedding similarity retrieval."""
         return (
-            f"Category: {self.error_category}\n"
+            f"Failure Type: {self.failure_type}\n"
+            f"Tool: {self.tool}\n"
             f"Task: {self.task}\n"
-            f"Error Signature: {self.error_signature or self.error[:150]}\n"
-            f"Error: {self.error[:300]}\n"
-            f"Correction: {self.correction[:300]}"
+            f"Task Family: {self.task_family}\n"
+            f"Architecture Family: {self.architecture_family}\n"
+            f"Error Signature: {self.error_signature or self.error_message[:150]}\n"
+            f"Error: {self.error_message[:300]}\n"
+            f"Root Cause: {self.root_cause}\n"
+            f"Fix: {self.fix[:300]}"
         )
 
 
@@ -143,6 +172,13 @@ class ExperienceStore:
             "error": exp.error,
             "error_category": exp.error_category,
             "error_signature": exp.error_signature,
+            "failure_type": exp.failure_type or exp.error_category,
+            "tool": exp.tool,
+            "root_cause": exp.root_cause,
+            "task_family": exp.task_family,
+            "architecture_family": exp.architecture_family,
+            "source_trajectory": exp.source_trajectory,
+            "confidence": float(exp.confidence),
         }
         self.collection.upsert(
             ids=[exp.id],
@@ -175,6 +211,17 @@ class ExperienceStore:
                 correction = nxt_params.get("code", nxt_params.get("current_rtl", str(nxt_params)))
                 cat = categorize_error(curr_obs)
 
+                # Determine root cause estimate
+                cause = "unspecified"
+                if cat == "SYNTAX_LINT":
+                    cause = "syntax or bitwidth mismatch in declaration"
+                elif cat == "FUNCTIONAL_ASSERT":
+                    cause = "functional arithmetic or reset behavior discrepancy"
+                elif cat == "SYNTHESIS_ERROR":
+                    cause = "unsynthesizable construct or missing techmap primitive"
+                elif cat == "FORMAL_FAIL":
+                    cause = "formal property assertion boundary failure"
+
                 exp = Experience(
                     task=getattr(episode, "task", ""),
                     attempted_solution=str(attempted)[:300],
@@ -185,6 +232,12 @@ class ExperienceStore:
                     error_category=cat,
                     error_signature=curr_obs[:120],
                     tool_sequence=[s.action for s in steps],
+                    failure_type=cat,
+                    tool=getattr(curr, "action", "TOOL"),
+                    root_cause=cause,
+                    task_family=getattr(episode, "task_id", "") or "hardware",
+                    source_trajectory=getattr(episode, "episode_id", ""),
+                    confidence=1.0,
                 )
                 exp_id = self.add(exp)
                 added_ids.append(exp_id)

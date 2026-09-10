@@ -103,6 +103,11 @@ class ActionRouter:
             "RETRIEVE_MEMORY": ActionType.RETRIEVE_MEMORY,
             "INSPECT_MEMORY": ActionType.RETRIEVE_MEMORY,
             "READ_SOURCE": ActionType.READ_SOURCE,
+            "PROPOSE_ARCHITECTURE": ActionType.PROPOSE_ARCHITECTURE,
+            "PROPOSE_ARCH": ActionType.PROPOSE_ARCHITECTURE,
+            "SEARCH_ARCHITECTURE": ActionType.PROPOSE_ARCHITECTURE,
+            "COMPARE_ARCHITECTURES": ActionType.COMPARE_ARCHITECTURES,
+            "COMPARE_ARCH": ActionType.COMPARE_ARCHITECTURES,
             "GENERATE_RTL": ActionType.GENERATE_RTL,
             "CREATE_RTL": ActionType.GENERATE_RTL,
             "GENERATE_TESTBENCH": ActionType.GENERATE_TESTBENCH,
@@ -253,9 +258,59 @@ def build_router(
     yosys=None,
     formal=None,
     design_store=None,
+    arch_engine=None,
 ) -> ActionRouter:
-    """Build an ActionRouter with all 15 action handlers wired up."""
+    """Build an ActionRouter with all action handlers wired up."""
     router = ActionRouter()
+
+    from agent.architecture_search import ArchitectureSearchEngine
+    search_engine = arch_engine or ArchitectureSearchEngine()
+
+    # ── 0. ARCHITECTURE SEARCH ───────────────────────────────────────
+    async def handle_propose_architecture(params: dict) -> ActionResult:
+        task_id = str(params.get("task_id", params.get("task", "mac")))
+        task_desc = str(params.get("description", params.get("task", "Hardware design task")))
+        n = int(params.get("n", params.get("candidates", 4)))
+        cands = search_engine.propose_candidates(task_id=task_id, task_description=task_desc, n=n)
+        summary_lines = [f"Proposed {len(cands)} architecture candidates for [{task_id}]:"]
+        for c in cands:
+            summary_lines.append(
+                f"- ID: {c.architecture_id} | Datapath: {c.datapath_structure} | "
+                f"Pipe: {c.pipeline_depth} | Parallelism: {c.parallelism} | "
+                f"Buffering: {c.buffering_strategy} | Est Cells: {c.estimated_resource_requirements.get('target_cells', 'N/A')}"
+            )
+        return ActionResult(
+            action=ActionType.PROPOSE_ARCHITECTURE,
+            status=ActionStatus.SUCCESS,
+            output="\n".join(summary_lines),
+            artifacts={c.architecture_id: c.datapath_structure for c in cands},
+            metrics={"candidates_count": len(cands)},
+            reward_contribution=0.1,
+        )
+
+    router.register(ActionType.PROPOSE_ARCHITECTURE, handle_propose_architecture)
+
+    async def handle_compare_architectures(params: dict) -> ActionResult:
+        arch_ids = params.get("architecture_ids", [])
+        cands = [search_engine.genealogy.candidates[aid] for aid in arch_ids if aid in search_engine.genealogy.candidates]
+        if not cands:
+            cands = list(search_engine.genealogy.candidates.values())[-4:]
+        ranked = search_engine.rank_candidates(cands)
+        lines = ["Architecture Comparison & Ranking:"]
+        for idx, c in enumerate(ranked):
+            lines.append(
+                f"{idx+1}. {c.architecture_id} (Reward: {c.reward:.3f}, Status: {c.verification_status}) "
+                f"- Datapath: {c.datapath_structure}, Pipe: {c.pipeline_depth}, Cells: {c.actual_synthesis_metrics.get('cells', 'N/A')}"
+            )
+        return ActionResult(
+            action=ActionType.COMPARE_ARCHITECTURES,
+            status=ActionStatus.SUCCESS,
+            output="\n".join(lines),
+            metrics={"compared_count": len(ranked)},
+            reward_contribution=0.05,
+        )
+
+    router.register(ActionType.COMPARE_ARCHITECTURES, handle_compare_architectures)
 
     # ── 1. SEARCH_WEB ────────────────────────────────────────────────
     async def handle_search_web(params: dict) -> ActionResult:

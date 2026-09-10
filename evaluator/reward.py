@@ -154,15 +154,18 @@ class RewardEngine:
         timing_ns: Optional[float] = None,
         timing_target: float = 5.0,
         power_uw: Optional[float] = None,
-        evaluation_mode: str = "research_fast",  # "research_fast" | "research_strict"
+        evaluation_mode: str = "FAST_DEVELOPMENT",  # "FAST_DEVELOPMENT" | "STRICT_EVALUATION" | "TRAINING" | "research_fast" | "research_strict"
     ) -> GroundedRewardResult:
         """Modular multi-objective reward with normalized weights and strict hard gates.
 
         Modes:
-        - 'research_fast': Formal and synthesis are optional; unavailable tools re-normalize weights.
-        - 'research_strict': Formal and real logic synthesis are mandatory; skipped/unavailable
-          tools fail strict gates and cannot obtain high reward.
+        - 'FAST_DEVELOPMENT' / 'research_fast': Formal and synthesis are optional; unavailable tools re-normalize weights.
+        - 'STRICT_EVALUATION' / 'TRAINING' / 'research_strict': Formal and real logic synthesis are mandatory;
+          skipped/unavailable tools fail strict gates and cannot obtain high reward.
         """
+        mode_upper = str(evaluation_mode).upper().strip()
+        is_strict = mode_upper in ("STRICT_EVALUATION", "TRAINING", "RESEARCH_STRICT")
+
         # Hard Gate 1: Compile check
         if not compile_success:
             return GroundedRewardResult(
@@ -201,8 +204,8 @@ class RewardEngine:
         # Correctness is 1.0
         r_correctness = 1.0
 
-        # Strict Mode Gate: Formal verification mandatory in research_strict
-        if evaluation_mode == "research_strict" and formal_status != "PASS":
+        # Strict Mode Gate: Formal verification mandatory in strict modes
+        if is_strict and formal_status != "PASS":
             return GroundedRewardResult(
                 compile_score=1.0,
                 functional_score=3.0,
@@ -214,12 +217,12 @@ class RewardEngine:
                 is_valid_hardware=False,
                 breakdown={
                     "evaluation_mode": evaluation_mode,
-                    "gate_failed": f"Formal verification mandatory in research_strict mode, but status was '{formal_status}'.",
+                    "gate_failed": f"Formal verification mandatory in {evaluation_mode} mode, but status was '{formal_status}'.",
                 },
             )
 
-        # Strict Mode Gate: Real synthesis mandatory in research_strict
-        if evaluation_mode == "research_strict" and (area is None or area <= 0):
+        # Strict Mode Gate: Real synthesis mandatory in strict modes
+        if is_strict and (area is None or area <= 0):
             return GroundedRewardResult(
                 compile_score=1.0,
                 functional_score=4.0,
@@ -231,7 +234,7 @@ class RewardEngine:
                 is_valid_hardware=False,
                 breakdown={
                     "evaluation_mode": evaluation_mode,
-                    "gate_failed": "Actual logic synthesis mandatory in research_strict mode, but area was unavailable or 0.",
+                    "gate_failed": f"Actual logic synthesis mandatory in {evaluation_mode} mode, but area was unavailable or 0.",
                 },
             )
 

@@ -166,6 +166,17 @@ class HardwareDesignEnv(gym.Env):
         """Return the current grounded design quality reward for TRL environment rollouts."""
         return float(self.current_design_quality)
 
+    @property
+    def current_rtl(self) -> str:
+        """Return the current RTL code content if file exists, else empty string."""
+        if self.current_rtl_path and os.path.exists(self.current_rtl_path):
+            try:
+                with open(self.current_rtl_path, "r", encoding="utf-8", errors="replace") as f:
+                    return f.read()
+            except Exception:
+                pass
+        return ""
+
     def reset(
         self,
         seed: Optional[int] = None,

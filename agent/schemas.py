@@ -18,10 +18,12 @@ from typing import Any
 
 class ActionType(str, Enum):
     """Actions the agent can take."""
-    # Core 15 actions
+    # Core 17 actions
     SEARCH_WEB = "SEARCH_WEB"
     RETRIEVE_MEMORY = "RETRIEVE_MEMORY"
     READ_SOURCE = "READ_SOURCE"
+    PROPOSE_ARCHITECTURE = "PROPOSE_ARCHITECTURE"
+    COMPARE_ARCHITECTURES = "COMPARE_ARCHITECTURES"
     GENERATE_RTL = "GENERATE_RTL"
     GENERATE_TESTBENCH = "GENERATE_TESTBENCH"
     EDIT_RTL = "EDIT_RTL"
@@ -92,6 +94,8 @@ class ActionResult:
     warnings: list[str] = field(default_factory=list)
     metrics: dict[str, float] = field(default_factory=dict)
     duration_s: float = 0.0
+    request: dict[str, Any] = field(default_factory=dict)
+    reward_contribution: float = 0.0
 
 
 # ── Planning ─────────────────────────────────────────────────────────
@@ -274,23 +278,52 @@ class EvaluationResult:
     timestamp: float = field(default_factory=time.time)
 
 
+# ── Architecture Search ──────────────────────────────────────────────
+
+@dataclass
+class HardwareArchitectureCandidate:
+    """A hardware architecture candidate in the architectural search space."""
+    architecture_id: str
+    task_id: str
+    parent_architecture_id: Optional[str] = None
+    datapath_structure: str = "direct"
+    pipeline_depth: int = 1
+    parallelism: int = 1
+    memory_organization: str = "registers"
+    buffering_strategy: str = "single_buffer"
+    arithmetic_strategy: str = "standard_signed"
+    interface_strategy: str = "valid_ready"
+    rtl_implementation: str = ""
+    estimated_resource_requirements: dict[str, Any] = field(default_factory=dict)
+    actual_synthesis_metrics: dict[str, Any] = field(default_factory=dict)
+    verification_status: str = "unverified"  # "unverified", "passed", "failed"
+    reward: float = 0.0
+    generation: int = 0
+    trajectory_id: Optional[str] = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
 # ── Trajectory ───────────────────────────────────────────────────────
 
 @dataclass
 class TrajectoryStep:
-    """A single step in a trajectory episode."""
+    """A single step in a trajectory episode with full provenance."""
     step_index: int = 0
     action: str = ""
     state_summary: str = ""
     action_params: dict[str, Any] = field(default_factory=dict)
     observation: str = ""
+    tool_output: str = ""
     reward: float = 0.0
+    next_state: dict[str, Any] = field(default_factory=dict)
+    done: bool = False
+    duration_s: float = 0.0
     timestamp: float = field(default_factory=time.time)
 
 
 @dataclass
 class Episode:
-    """A complete trajectory episode from task start to completion."""
+    """A complete trajectory episode from task start to completion with full provenance."""
     episode_id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
     task: str = ""
     steps: list[TrajectoryStep] = field(default_factory=list)
@@ -301,6 +334,22 @@ class Episode:
     success: bool = False
     started_at: float = field(default_factory=time.time)
     completed_at: float | None = None
+    # Rigorous experiment and model provenance tracking
+    experiment_id: str = ""
+    model_id: str = "qwen3:4b"
+    model_version: str = "1.0"
+    adapter_version: str = ""
+    task_id: str = ""
+    benchmark_version: str = "1.0"
+    seed: int = 42
+    generation: int = 0
+    architecture_id: str = ""
+    parent_architecture_id: str = ""
+    final_rtl: str = ""
+    final_verification: dict[str, Any] = field(default_factory=dict)
+    final_metrics: dict[str, Any] = field(default_factory=dict)
+    failure_reason: str = ""
+    success_reason: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property

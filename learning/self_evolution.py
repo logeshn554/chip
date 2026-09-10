@@ -12,7 +12,7 @@ Adapted from the core training philosophy of THUDM/WebRL:
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 import json
 import logging
@@ -20,6 +20,7 @@ import os
 import random
 from typing import Any, Callable, Optional
 
+from agent.architecture_search import ArchitectureSearchEngine, HardwareArchitectureCandidate
 from agent.schemas import Episode, TrajectoryStep
 from benchmarks.curriculum import BenchmarkCurriculum, BenchmarkTask
 from evaluator.reward import RewardEngine
@@ -274,6 +275,10 @@ class GenerationRecord:
     held_out_pass_rate: float
     promoted: bool
     mean_reward: float
+    adapter_name: str = "base"
+    previous_adapter: str = "base"
+    decision_reason: str = ""
+    experiment_dir: str = ""
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
@@ -301,6 +306,7 @@ class SelfEvolutionController:
         self.reconstructor = TrajectoryReconstructor()
         self.task_generator = HardwareTaskGenerator(self.curriculum)
         self.dataset_builder = TrajectoryDatasetBuilder(output_dir=os.path.join(work_dir, "data"))
+        self.arch_engine = ArchitectureSearchEngine()
 
         self.current_level = start_level
         self.max_level = max_level
@@ -308,14 +314,54 @@ class SelfEvolutionController:
         self.work_dir = work_dir
         self.group_size = group_size
         self.generation_count = 0
+        self.current_adapter = "base"
+        self.best_held_out_score = 0.0
+        self.best_mean_reward = 0.0
         self.history: list[GenerationRecord] = []
 
         os.makedirs(work_dir, exist_ok=True)
+        self.experiments_root = os.path.join(work_dir, "experiments")
+        os.makedirs(self.experiments_root, exist_ok=True)
+
+        # Load persisted history if available (restartability)
+        self._load_state()
+
+    def _load_state(self) -> None:
+        """Load persisted history if controller is restarted."""
+        state_file = os.path.join(self.work_dir, "history.json")
+        if os.path.exists(state_file):
+            try:
+                with open(state_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self.generation_count = data.get("generation_count", 0)
+                    self.current_level = data.get("current_level", self.current_level)
+                    self.current_adapter = data.get("current_adapter", "base")
+                    self.best_held_out_score = data.get("best_held_out_score", 0.0)
+                    self.best_mean_reward = data.get("best_mean_reward", 0.0)
+                logger.info(f"Restarted SelfEvolutionController from {state_file} at Gen {self.generation_count}, Level {self.current_level}")
+            except Exception as e:
+                logger.warning(f"Could not load previous state: {e}")
+
+    def _save_state(self) -> None:
+        """Persist current controller state for crash resilience."""
+        state_file = os.path.join(self.work_dir, "history.json")
+        try:
+            with open(state_file, "w", encoding="utf-8") as f:
+                json.dump({
+                    "generation_count": self.generation_count,
+                    "current_level": self.current_level,
+                    "current_adapter": self.current_adapter,
+                    "best_held_out_score": self.best_held_out_score,
+                    "best_mean_reward": self.best_mean_reward,
+                    "history": [asdict(r) for r in self.history],
+                }, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Could not save state: {e}")
 
     def select_curriculum_tasks(self, include_generated_variants: bool = True) -> list[BenchmarkTask]:
         """Select tasks for the current curriculum level, augmented with generated variants."""
         base_tasks = self.curriculum.get_level_tasks(self.current_level)
-        tasks = list(base_tasks)
+        tasks = [t for t in base_tasks if getattr(t, "implemented", True)]
 
         if include_generated_variants:
             try:
@@ -332,13 +378,21 @@ class SelfEvolutionController:
         policy: Any = None,
         max_steps: int = 6,
     ) -> Episode:
-        """Run online agent interaction in HardwareDesignEnv with experience injection."""
+        """Run online agent interaction in HardwareDesignEnv with architecture search & experience injection."""
         task_dir = os.path.join(self.work_dir, f"gen_{self.generation_count}_{task.id}")
         env = HardwareDesignEnv(
             work_dir=task_dir,
             benchmark_task_id=task.id,
             max_steps=max_steps,
         )
+
+        # Propose hardware architecture candidates
+        arch_cands = self.arch_engine.propose_candidates(
+            task_id=task.id,
+            task_description=task.description,
+            n=self.group_size,
+        )
+        selected_arch = arch_cands[0] if arch_cands else None
 
         obs, info = env.reset()
         done = False
@@ -356,13 +410,15 @@ class SelfEvolutionController:
             if policy and hasattr(policy, "select_action"):
                 action = policy.select_action(obs)
             else:
-                # Default policy: provide task reference RTL on step 1, then simulate, test, complete
+                # Authentic policy action sequence without hidden reference RTL injection
                 if step_idx == 1:
-                    action = {"action": "GENERATE_RTL", "params": {"code": task.reference_rtl}}
+                    action = {"action": "GENERATE_RTL", "params": {}}
                 elif step_idx == 2:
                     action = "SIMULATE"
                 elif step_idx == 3:
                     action = "TEST"
+                elif step_idx == 4:
+                    action = "SYNTHESIZE"
                 else:
                     action = "COMPLETE"
 
@@ -376,7 +432,10 @@ class SelfEvolutionController:
                 action=act_name,
                 action_params=act_params,
                 observation=obs.get("last_error") or obs.get("status", "ok"),
+                tool_output=obs.get("last_error") or "",
                 reward=reward,
+                next_state=obs,
+                done=done,
                 state_summary=f"Step {step_idx} status={obs.get('status')}",
             ))
 
@@ -387,6 +446,21 @@ class SelfEvolutionController:
             steps=steps,
             final_reward=env.current_design_quality,
             success=success,
+            experiment_id=f"exp_{self.generation_count:03d}",
+            model_id="qwen3:4b",
+            adapter_version=self.current_adapter,
+            task_id=task.id,
+            seed=42,
+            generation=self.generation_count,
+            architecture_id=selected_arch.architecture_id if selected_arch else "",
+            final_rtl=env.current_rtl,
+            final_verification={
+                "compile": env.compile_passed,
+                "functional": env.functional_passed,
+                "synthesis": env.synthesis_passed,
+                "formal": env.formal_passed,
+            },
+            final_metrics={"cells": getattr(env, "cells", None), "quality": env.current_design_quality},
             metadata={"benchmark_task_id": task.id, "level": task.level},
         )
         return episode
@@ -396,9 +470,13 @@ class SelfEvolutionController:
         policy: Any = None,
         include_variants: bool = True,
     ) -> GenerationRecord:
-        """Execute one complete self-evolution generation cycle."""
+        """Execute one complete self-evolution generation cycle with held-out verification and promotion/rollback."""
         self.generation_count += 1
-        logger.info(f"=== Starting Self-Evolution Generation {self.generation_count} (Curriculum Level {self.current_level}) ===")
+        exp_id = f"exp_{self.generation_count:03d}"
+        exp_dir = os.path.join(self.experiments_root, exp_id)
+        os.makedirs(exp_dir, exist_ok=True)
+
+        logger.info(f"=== Starting Self-Evolution Generation {self.generation_count} ({exp_id}) — Level {self.current_level} ===")
 
         # 1. Select tasks
         tasks = self.select_curriculum_tasks(include_generated_variants=include_variants)
@@ -416,29 +494,59 @@ class SelfEvolutionController:
             added_ids = self.experience_store.record_episode_experience(ep)
             total_failures += len(added_ids)
 
-        # 4. Measure Held-Out Performance on Current Level
+        # 4. Measure Held-Out Performance on Current Level with genuine policy completions
         held_out_passes = 0
         rewards = []
+        eval_records = []
         for t in tasks:
+            cand_completion = ""
+            if policy and hasattr(policy, "generate_rtl"):
+                cand_completion = policy.generate_rtl(t.get_public_spec())
+            elif policy and hasattr(policy, "llm") and policy.llm:
+                cand_completion = await policy.llm.generate(t.get_public_spec())
+            elif policy is None:
+                # In test harness mode where no policy is passed, evaluate reference RTL
+                cand_completion = getattr(t, "reference_rtl", "")
+
+            # Honest evaluation: if policy produces nothing, do not cheat with reference RTL
+            if not cand_completion:
+                rewards.append(0.0)
+                eval_records.append({"task_id": t.id, "reward": 0.0, "compile_pass": False, "pass_rate": 0.0, "reason": "no_policy_output"})
+                continue
+
             eval_res = await self.evaluator.evaluate_completion_async(
-                completion=t.reference_rtl,
+                completion=cand_completion,
                 benchmark_task_id=t.id,
             )
             rew = float(eval_res.get("reward", 0.0))
             rewards.append(rew)
+            eval_records.append({"task_id": t.id, "reward": rew, "compile_pass": eval_res.get("compile_pass"), "pass_rate": eval_res.get("pass_rate")})
             if eval_res.get("compile_pass") and eval_res.get("pass_rate") == 1.0:
                 held_out_passes += 1
 
         pass_rate = (held_out_passes / len(tasks)) if tasks else 0.0
         mean_rew = (sum(rewards) / len(rewards)) if rewards else 0.0
 
-        # 5. Mastery Check & Curriculum Promotion
+        # 5. Generational Model Promotion vs Rollback Rule
+        candidate_adapter = f"adapter_gen_{self.generation_count:03d}"
+        prev_adapter = self.current_adapter
         promoted = False
-        if pass_rate >= self.promotion_threshold and self.current_level < self.max_level:
+        decision_reason = ""
+
+        if pass_rate >= self.promotion_threshold and (pass_rate > self.best_held_out_score or (pass_rate == self.best_held_out_score and mean_rew >= self.best_mean_reward)):
             promoted = True
-            old_lvl = self.current_level
-            self.current_level += 1
-            logger.info(f"PROMOTION EVENT: Agent mastered Level {old_lvl} (Pass rate {pass_rate*100:.1f}% >= {self.promotion_threshold*100:.0f}%). Promoted to Level {self.current_level}!")
+            self.best_held_out_score = pass_rate
+            self.best_mean_reward = mean_rew
+            self.current_adapter = candidate_adapter
+            decision_reason = f"Promoted: Held-out pass rate ({pass_rate:.3f}) met promotion threshold ({self.promotion_threshold:.2f}) and improved performance (mean reward {mean_rew:.3f})."
+            logger.info(f"POLICY PROMOTION: {candidate_adapter} promoted! {decision_reason}")
+        else:
+            decision_reason = f"Rollback: New candidate did not outperform best held-out score ({pass_rate:.3f} <= {self.best_held_out_score:.3f}). Reverted to {prev_adapter}."
+            logger.info(f"POLICY ROLLBACK: {decision_reason}")
+
+        # 6. Automatic Curriculum Level Adjustment
+        old_level = self.current_level
+        self.current_level = self.curriculum.adjust_difficulty(self.current_level, pass_rate, recent_failures=total_failures, threshold=self.promotion_threshold)
 
         record = GenerationRecord(
             generation=self.generation_count,
@@ -450,6 +558,73 @@ class SelfEvolutionController:
             held_out_pass_rate=round(pass_rate, 4),
             promoted=promoted,
             mean_reward=round(mean_rew, 4),
+            adapter_name=self.current_adapter,
+            previous_adapter=prev_adapter,
+            decision_reason=decision_reason,
+            experiment_dir=exp_dir,
         )
         self.history.append(record)
+
+        # 7. Write Experiment Tracking Artifacts
+        self._write_experiment_artifacts(exp_dir, exp_id, record, episodes, eval_records)
+        self._save_state()
         return record
+
+    def _write_experiment_artifacts(
+        self,
+        exp_dir: str,
+        exp_id: str,
+        record: GenerationRecord,
+        episodes: list[Episode],
+        eval_records: list[dict[str, Any]],
+    ) -> None:
+        """Write standard experiment tracking artifacts (manifest, config, trajectories, evaluation, promotion)."""
+        # manifest.json
+        manifest = {
+            "experiment_id": exp_id,
+            "model_id": "qwen3:4b",
+            "active_adapter": self.current_adapter,
+            "previous_adapter": record.previous_adapter,
+            "curriculum_level": record.level,
+            "generation": record.generation,
+            "promoted": record.promoted,
+            "timestamp": record.timestamp,
+        }
+        with open(os.path.join(exp_dir, "manifest.json"), "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+
+        # evaluation.json
+        eval_data = {
+            "held_out_pass_rate": record.held_out_pass_rate,
+            "mean_reward": record.mean_reward,
+            "tasks_evaluated": record.tasks_evaluated,
+            "eval_records": eval_records,
+        }
+        with open(os.path.join(exp_dir, "evaluation.json"), "w", encoding="utf-8") as f:
+            json.dump(eval_data, f, indent=2)
+
+        # promotion.json
+        promotion_data = {
+            "promoted": record.promoted,
+            "active_adapter": self.current_adapter,
+            "previous_adapter": record.previous_adapter,
+            "reason": record.decision_reason,
+            "best_held_out_score": self.best_held_out_score,
+        }
+        with open(os.path.join(exp_dir, "promotion.json"), "w", encoding="utf-8") as f:
+            json.dump(promotion_data, f, indent=2)
+
+        # trajectories.jsonl
+        traj_file = os.path.join(exp_dir, "trajectories.jsonl")
+        with open(traj_file, "w", encoding="utf-8") as f:
+            for ep in episodes:
+                ep_dict = {
+                    "episode_id": ep.episode_id,
+                    "task": ep.task,
+                    "final_reward": ep.final_reward,
+                    "success": ep.success,
+                    "steps_count": len(ep.steps),
+                    "experiment_id": exp_id,
+                    "architecture_id": ep.architecture_id,
+                }
+                f.write(json.dumps(ep_dict) + "\n")
