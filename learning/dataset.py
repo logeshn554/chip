@@ -424,7 +424,7 @@ class TrajectoryDatasetBuilder:
                     next_state=next_state,
                     done=is_last_step or (step.action == "COMPLETE"),
                     info={
-                        "model": ep.metadata.get("model", "Qwen3-4B"),
+                        "model": ep.metadata.get("model", "Qwen-14B"),
                         "duration": getattr(ep, "duration_s", 0.0),
                         "success": ep.success,
                         "final_reward": ep.final_reward,

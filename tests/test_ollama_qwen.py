@@ -1,10 +1,10 @@
 """
-Tests for Ollama / Qwen3-4B client integration.
+Tests for Ollama / Qwen-14B client integration.
 
 Verifies:
-- Ollama available + qwen3:4b available
+- Ollama available + qwen2.5:14b available
 - Ollama unavailable
-- qwen3:4b unavailable
+- qwen2.5:14b unavailable
 - HTTP 404
 - HTTP 500
 - Empty response
@@ -122,7 +122,7 @@ async def test_http_404_error(ollama_client):
         404,
         "Not Found",
         {},
-        BytesIO(b"model 'qwen3:4b' not found"),
+        BytesIO(b"model 'qwen2.5:14b' not found"),
     )
 
     with patch("urllib.request.urlopen", side_effect=http_err):

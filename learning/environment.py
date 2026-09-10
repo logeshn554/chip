@@ -2,7 +2,7 @@
 Hardware Design RL Environment — Gymnasium Environment for Hardware Agent Training.
 
 Implements an official Gymnasium Environment (gymnasium.Env) designed as the underlying
-execution environment for an external policy (e.g. Qwen3-4B, PPO, or GRPO):
+execution environment for an external policy (e.g. Qwen-14B, PPO, or GRPO):
 
 Policy / Qwen
       ↓ (selects typed action)
@@ -95,6 +95,7 @@ class HardwareDesignEnv(gym.Env):
         formal_properties: Optional[str] = None,
         target_cells: float = 500.0,
         benchmark_task_id: Optional[str] = None,
+        allow_heuristic_fallback: bool = True,
     ):
         super().__init__()
         self.task = task
@@ -104,6 +105,7 @@ class HardwareDesignEnv(gym.Env):
         self.test_file = test_file
         self.formal_properties = formal_properties
         self.target_cells = target_cells
+        self.allow_heuristic_fallback = allow_heuristic_fallback
 
         if benchmark_task_id:
             try:
@@ -318,10 +320,14 @@ class HardwareDesignEnv(gym.Env):
                 step_reward = -0.3
                 self.last_error = "Cannot synthesize uncompiled RTL."
             else:
-                res = await self.yosys.synthesize(self.current_rtl_path, top_module=self.target_module)
+                res = await self.yosys.synthesize(
+                    self.current_rtl_path,
+                    top_module=self.target_module,
+                    allow_heuristic_fallback=self.allow_heuristic_fallback,
+                )
                 if res.get("status") == "passed":
                     self.synthesis_passed = True
-                    self.cells_count = res.get("cells", 0) or 0
+                    self.cells_count = res.get("cells") or res.get("heuristic_cell_guess", 0) or 0
                     step_reward = 0.2
                     info["cells"] = self.cells_count
                 else:
@@ -502,7 +508,7 @@ class HardwareVectorObservationWrapper(gym.ObservationWrapper if HAS_GYMNASIUM e
 
 
 class QwenHardwareDesignPolicy:
-    """External LLM policy wrapper connecting Qwen3-4B to HardwareDesignEnv.
+    """External LLM policy wrapper connecting Qwen-14B to HardwareDesignEnv.
     
     Clarifies architectural boundary:
         Hardware Agent / Qwen Policy

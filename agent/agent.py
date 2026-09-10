@@ -1,7 +1,7 @@
 """
 Autonomous Hardware Design and Verification Agent.
 
-Executes the self-evolving loop around Qwen3-4B:
+Executes the self-evolving loop around Qwen-14B:
 - Inspects relevant memory
 - Decides whether web research is needed
 - Extracts compact context with ScrapeGraph adapter
@@ -176,7 +176,9 @@ class HardwareAgent:
 
         elif action == "RUN_YOSYS":
             file_path = os.path.join(self.work_dir, state.active_filename)
-            res = await self.yosys_tool.synthesize(file_path, top_module="mac")
+            top_mod = params.get("top_module", None)
+            allow_heuristic = params.get("allow_heuristic_fallback", True)
+            res = await self.yosys_tool.synthesize(file_path, top_module=top_mod, allow_heuristic_fallback=allow_heuristic)
             self._log_observability("synthesis_results", res)
             state.add_step(action, res.get("status", "failed"), res)
             return res
@@ -195,7 +197,7 @@ class HardwareAgent:
 
         elif action == "COMPARE_DESIGNS":
             res = self.design_store.compare_designs(
-                module_name=params.get("module_name", "mac"),
+                module_name=params.get("module_name", "top"),
                 ver_a=params.get("ver_a", "v1.0"),
                 ver_b=params.get("ver_b", "v1.1"),
             )
@@ -203,9 +205,10 @@ class HardwareAgent:
             return res
 
         elif action == "SAVE_DESIGN":
+            mod_name = params.get("module_name", os.path.splitext(state.active_filename)[0] if state.active_filename else "design")
             record = DesignRecord(
-                design_id=f"mac_v{state.iteration}",
-                module_name=params.get("module_name", "mac"),
+                design_id=f"{mod_name}_v{state.iteration}",
+                module_name=mod_name,
                 version=params.get("version", f"v1.{state.iteration}"),
                 rtl_source=state.current_rtl,
                 reward=state.current_reward,
@@ -264,7 +267,7 @@ class HardwareAgent:
                     state.relevant_memory.append(f"[Past Debugging Lesson ({cat})]: Error '{err[:60]}' was fixed by: {corr[:120]}")
 
         while not state.is_finished and state.iteration < state.max_iterations:
-            # Construct bounded working context for Qwen3-4B
+            # Construct bounded working context for Qwen-14B
             context_prompt = state.build_model_context()
             full_prompt = f"{SYSTEM_PROMPT}\n\n{context_prompt}\n\nDecide next action:"
 
@@ -323,7 +326,8 @@ class HardwareAgent:
                 self._log_observability("reward", {"total_reward": state.current_reward, "breakdown": reward_res.breakdown})
 
                 # Save successful design
-                await self._execute_action("SAVE_DESIGN", {"module_name": "mac", "version": "v1.0"}, state)
+                active_mod = os.path.splitext(state.active_filename)[0] if state.active_filename else "design"
+                await self._execute_action("SAVE_DESIGN", {"module_name": active_mod, "version": "v1.0"}, state)
                 await self._execute_action("FINISH", {"summary": "All verification stages passed cleanly."}, state)
 
         # Final reward calculation if loop exited

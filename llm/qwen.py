@@ -1,7 +1,7 @@
 """
 Qwen LLM Client for Local Ollama backend.
 
-Targets Qwen3-4B through local Ollama API (http://localhost:11434).
+Targets Qwen-14B (qwen2.5:14b) through local Ollama API (http://localhost:11434).
 Includes JSON extraction, reasoning parsing, strict error handling, and model verification.
 """
 
@@ -17,6 +17,7 @@ import urllib.error
 import urllib.request
 
 from llm.interface import LLMInterface, LLMResponse, Message, get_default_model
+from utils.device import get_ollama_gpu_options
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +161,7 @@ class OllamaQwenClient(LLMInterface):
                 "temperature": kwargs.get("temperature", self.temperature),
                 "top_p": kwargs.get("top_p", self.top_p),
                 "num_predict": kwargs.get("max_tokens", 8192),
+                **get_ollama_gpu_options(),
             },
         }
 

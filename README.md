@@ -253,7 +253,7 @@ To prove that model adapters actually evolve and are evaluated independently wit
 ### Prerequisites
 - Python 3.11+
 - Git
-- Local LLM: Ollama with `qwen3:4b` (`ollama pull qwen3:4b`) or Transformers / vLLM.
+- Local LLM: Ollama with `qwen2.5:14b` (`ollama pull qwen2.5:14b`) or Transformers / vLLM.
 - EDA tools for native execution: Verilator, Cocotb, Yosys, SymbiYosys (`sby`). (All tests include automated mock fallbacks when EDA binaries are absent).
 
 ### Step 1: Install Dependencies
@@ -288,7 +288,7 @@ python scripts/run_evolution_pilot.py
 ```bash
 python scripts/run_physical_envelope_evolution.py
 ```
-*(Runs open-ended multi-generation architecture search against the 100x30x12mm, 5W, 85°C, 8GB RAM, USB-C, Qwen3-4B-INT4 >= 12-15 tok/s physical envelope until all constraints pass).*
+*(Runs open-ended multi-generation architecture search against the 100x30x12mm, 5W, 85°C, 8GB RAM, USB-C, Qwen-14B-INT4 >= 12-15 tok/s physical envelope until all constraints pass).*
 
 ### Step 7: Run End-to-End Autonomous Agent Milestone
 ```bash

@@ -1,4 +1,4 @@
-"""Tests for the Qwen3-4B client."""
+"""Tests for the Qwen client (canonical: Qwen-14B / qwen2.5:14b)."""
 
 import pytest
 from agent.qwen import QwenClient

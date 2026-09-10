@@ -1,5 +1,5 @@
 """
-Qwen3-4B LLM Interface — Unified, hardened client for hardware reasoning and generation.
+Qwen-14B LLM Interface — Unified, hardened client for hardware reasoning and generation.
 
 Supports multiple backends:
 - "transformers": Direct HuggingFace Transformers inference (local GPU/CPU)
@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 import urllib.error
@@ -27,6 +28,7 @@ from typing import Any, Optional
 
 from agent.schemas import QwenResponse
 from llm.interface import LLMInterface, LLMResponse, Message, get_default_model
+from utils.device import detect_system_gpus, get_ollama_gpu_options, get_torch_device_and_dtype, has_gpu
 
 logger = logging.getLogger(__name__)
 
@@ -56,15 +58,17 @@ class QwenClient(LLMInterface):
         self._tokenizer = None
         self._openai_client = None
 
+        gpus = detect_system_gpus()
+        gpu_str = f", GPU={[g['name'] for g in gpus]}" if gpus else ", GPU=None"
         logger.info(
             f"QwenClient initialized — backend={self.backend}, model={self.model_name}, "
-            f"temp={self.temperature}, timeout={self.timeout}s"
+            f"temp={self.temperature}, timeout={self.timeout}s{gpu_str}"
         )
 
     # ── Lazy Initializers ────────────────────────────────────────────
 
     def _init_transformers(self):
-        """Load model and tokenizer via HuggingFace Transformers."""
+        """Load model and tokenizer via HuggingFace Transformers with automatic GPU offload."""
         if self._model is not None:
             return
 
@@ -73,11 +77,15 @@ class QwenClient(LLMInterface):
             import torch
             from transformers import AutoModelForCausalLM, AutoTokenizer
 
+            device_str, dtype = get_torch_device_and_dtype()
+            device_map = self.config.get("device_map", "auto" if device_str != "cpu" else None)
+            torch_dtype = self.config.get("torch_dtype", dtype if dtype else "auto")
+
             self._tokenizer = AutoTokenizer.from_pretrained(self.model_name)
             self._model = AutoModelForCausalLM.from_pretrained(
                 self.model_name,
-                torch_dtype=self.config.get("torch_dtype", "auto"),
-                device_map=self.config.get("device_map", "auto"),
+                torch_dtype=torch_dtype,
+                device_map=device_map,
             )
             logger.info(f"Model loaded successfully on {self._model.device}")
         except Exception as e:
@@ -110,7 +118,7 @@ class QwenClient(LLMInterface):
         max_tokens: int | None = None,
         enable_thinking: bool | None = None,
     ) -> QwenResponse:
-        """Generate a response from Qwen3-4B.
+        """Generate a response from Qwen-14B.
 
         Args:
             messages: Chat messages in OpenAI format or list of Message objects
@@ -121,15 +129,17 @@ class QwenClient(LLMInterface):
         Returns:
             QwenResponse with thinking, content, raw_output, and token counts
         """
-        # Normalize messages to standard dicts
-        normalized_messages: list[dict[str, str]] = []
-        for m in messages:
-            if isinstance(m, Message):
-                normalized_messages.append({"role": m.role, "content": m.content})
-            elif isinstance(m, dict):
-                normalized_messages.append(m)
-            else:
-                normalized_messages.append({"role": "user", "content": str(m)})
+        if isinstance(messages, str):
+            normalized_messages = [{"role": "user", "content": messages}]
+        else:
+            normalized_messages = []
+            for m in messages:
+                if isinstance(m, Message):
+                    normalized_messages.append({"role": m.role, "content": m.content})
+                elif isinstance(m, dict):
+                    normalized_messages.append(m)
+                else:
+                    normalized_messages.append({"role": "user", "content": str(m)})
 
         temp = temperature if temperature is not None else self.temperature
         max_tok = max_tokens if max_tokens is not None else self.max_new_tokens
@@ -159,6 +169,16 @@ class QwenClient(LLMInterface):
 
         res.generation_time_s = time.time() - start_time
         return res
+
+    def is_available(self) -> bool:
+        """Check if backend is ready or reachable."""
+        if self.mock_mode or self.backend == "mock" or os.environ.get("LLM_PROVIDER") == "mock":
+            return True
+        return True
+
+    def count_tokens(self, text: str) -> int:
+        """Estimate token count for context budgeting."""
+        return max(1, len(text) // 4)
 
     def verify_model_installed(self) -> None:
         """Check Ollama connectivity and verify that model is installed."""
@@ -205,14 +225,23 @@ class QwenClient(LLMInterface):
         if not matched:
             raise RuntimeError(f"Model {self.model_name} is not installed in Ollama. Run: ollama pull {self.model_name}")
 
-    async def complete(self, messages: list[Message], **kwargs: Any) -> LLMResponse:
+    async def chat(self, messages: list[Message | dict[str, str]], **kwargs: Any) -> LLMResponse:
+        """Generate a response given a list of chat messages."""
+        return await self.complete(messages, **kwargs)
+
+    async def generate_json(
+        self, prompt: str, schema: Optional[dict[str, Any]] = None, **kwargs: Any
+    ) -> dict[str, Any]:
+        """Generate structured JSON response adhering to an optional schema."""
+        resp = await self.generate(prompt, **kwargs)
+        return self.extract_json(resp.content or resp.raw_output)
+
+    async def complete(self, messages: list[Message | dict[str, str]], **kwargs: Any) -> LLMResponse:
         """Implementation of LLMInterface.complete."""
         resp = await self.generate(messages, **kwargs)
         return LLMResponse(
-            content=resp.content,
             text=resp.content,
-            raw_response=resp.raw_output,
-            reasoning=resp.thinking,
+            raw_response={"thinking": resp.thinking, "raw": resp.raw_output},
             tokens_used=resp.tokens_used,
             model=self.model_name,
             metadata={
@@ -228,17 +257,19 @@ class QwenClient(LLMInterface):
     async def _generate_ollama(
         self, messages: list[dict[str, str]], temp: float, max_tok: int
     ) -> QwenResponse:
-        """Call Ollama chat endpoint."""
+        """Call Ollama chat endpoint with automatic GPU layer offloading."""
         url = f"{self.ollama_host}/api/chat"
+        ollama_opts = {
+            "temperature": temp,
+            "num_predict": max_tok,
+            "top_p": self.top_p,
+            **get_ollama_gpu_options(),
+        }
         payload = {
             "model": self.model_name,
             "messages": messages,
             "stream": False,
-            "options": {
-                "temperature": temp,
-                "num_predict": max_tok,
-                "top_p": self.top_p,
-            },
+            "options": ollama_opts,
         }
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(

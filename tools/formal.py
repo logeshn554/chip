@@ -103,7 +103,7 @@ depth {depth}
     async def verify(
         self,
         file_path: str,
-        top_module: str = "mac",
+        top_module: Optional[str] = None,
         depth: int = 20,
         timeout: float = 60.0,
         external_properties: Optional[str] = None,
@@ -139,6 +139,13 @@ depth {depth}
                 "errors": [f"File not found: {file_path}"],
                 "file": file_path,
             }
+
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            code_sample = f.read()
+
+        mod_match = re.search(r"\bmodule\s+([a-zA-Z_][a-zA-Z0-9_]*)", code_sample)
+        if not top_module:
+            top_module = mod_match.group(1) if mod_match else "top"
 
         with open(file_path, "r", encoding="utf-8", errors="replace") as f:
             code = f.read()
@@ -293,6 +300,13 @@ depth {depth}
 
     async def execute(self, **kwargs: Any) -> dict[str, Any]:
         """Strict tool entrypoint for FORMAL_VERIFY."""
-        file_path = kwargs.get("file_path", kwargs.get("file", "mac.sv"))
-        top_module = kwargs.get("top_module", "mac")
+        file_path = kwargs.get("file_path", kwargs.get("file", None))
+        if not file_path:
+            for cand in ["./rtl/generated/top.sv", "./rtl/generated/mac.sv"]:
+                if os.path.exists(cand):
+                    file_path = cand
+                    break
+            if not file_path:
+                file_path = "top.sv"
+        top_module = kwargs.get("top_module", None)
         return await self.verify(file_path=file_path, top_module=top_module)

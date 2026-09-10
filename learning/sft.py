@@ -1,7 +1,7 @@
 """
-SFT Trainer — Supervised Fine-Tuning scaffold for Qwen3-4B.
+SFT Trainer — Supervised Fine-Tuning scaffold for Qwen-14B.
 
-Uses LoRA/QLoRA with the TRL library to fine-tune Qwen3-4B
+Uses LoRA/QLoRA with the TRL library to fine-tune Qwen-14B
 on successful hardware design trajectories.
 
 NOTE: This is a scaffold for Phase 8. Full implementation
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 class SFTTrainer:
-    """Supervised Fine-Tuning for Qwen3-4B using LoRA.
+    """Supervised Fine-Tuning for Qwen-14B using LoRA.
 
     Fine-tunes the model on successful design trajectories
     so it learns from its best experiences.
@@ -26,7 +26,7 @@ class SFTTrainer:
 
     def __init__(self, config: dict[str, Any] | None = None):
         config = config or {}
-        self.model_name = config.get("model_name", "Qwen/Qwen3-4B")
+        self.model_name = config.get("model_name", "Qwen/Qwen2.5-14B-Instruct")
         self.learning_rate = config.get("learning_rate", 2e-5)
         self.num_epochs = config.get("num_epochs", 3)
         self.lora_r = config.get("lora_r", 16)
@@ -82,8 +82,11 @@ class SFTTrainer:
 
         has_cuda = torch.cuda.is_available()
         has_hip = getattr(torch.version, "hip", None) is not None
-        use_fp16 = bool(has_cuda or has_hip)
-        device_map = "auto" if (has_cuda or has_hip) else None
+        has_xpu = hasattr(torch, "xpu") and torch.xpu.is_available()
+        has_mps = getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available()
+        has_gpu_accel = bool(has_cuda or has_hip or has_xpu or has_mps)
+        use_fp16 = has_gpu_accel
+        device_map = "auto" if has_gpu_accel else None
 
         # Load model with device awareness
         tokenizer = AutoTokenizer.from_pretrained(self.model_name)

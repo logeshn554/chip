@@ -8,7 +8,7 @@ Research rounds:
   Round 0  →  task decomposition and question enumeration (always)
   Round 1  →  targeted web research for unknown specifications
   Round 2  →  component discovery (if a physical design is required)
-  Round 3  →  architecture hypothesis generation (Qwen3-4B)
+  Round 3  →  architecture hypothesis generation (Qwen-14B)
 
 No hardcoded component names, URLs, architecture names, or task keywords.
 """

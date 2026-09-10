@@ -1,5 +1,5 @@
 """
-Prompt templates and system instructions for Qwen3-4B Hardware Design Agent.
+Prompt templates and system instructions for Qwen-14B Hardware Design Agent.
 """
 
 SYSTEM_PROMPT = """You are an expert autonomous Hardware Design and Verification Agent.

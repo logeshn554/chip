@@ -3,7 +3,7 @@ Targeted content filtering for technical hardware documentation.
 
 Strips non-technical HTML artifacts, ads, navigation, and boilerplate.
 Extracts only relevant SystemVerilog, formulas, signal definitions, and architectural concepts.
-Enforces strict token budgets for Qwen3-4B context management.
+Enforces strict token budgets for Qwen-14B context management.
 """
 
 from __future__ import annotations

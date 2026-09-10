@@ -3,7 +3,7 @@ Agent Loop — the self-evolution cycle.
 
 This is the main orchestration loop that ties together:
 - Memory retrieval
-- Qwen3-4B reasoning
+- Qwen-14B reasoning
 - Action execution via the router
 - Evaluation and reward computation
 - Trajectory recording
@@ -21,7 +21,7 @@ from rich.table import Table
 
 from agent.qwen import QwenClient
 from agent.planner import Planner
-from agent.action_router import ActionRouter
+from agent.action_router import ActionRouter, build_router
 from agent.schemas import (
     ActionResult,
     ActionStatus,
@@ -44,7 +44,7 @@ class AgentLoop:
         Retrieve Memory → Reason (Qwen) → Act (Tools) → Evaluate → Reward → Store → Learn
 
     Args:
-        qwen: Qwen3-4B client
+        qwen: Qwen-14B client
         planner: Task planner
         router: Action router with tools registered
         memory: Memory system (knowledge + experience + design)
@@ -55,21 +55,21 @@ class AgentLoop:
 
     def __init__(
         self,
-        qwen: QwenClient,
-        planner: Planner,
-        router: ActionRouter,
+        qwen: QwenClient | None = None,
+        planner: Planner | None = None,
+        router: ActionRouter | None = None,
         memory=None,
         evaluator=None,
         trajectory_store=None,
         config: dict[str, Any] | None = None,
     ):
-        self.qwen = qwen
-        self.planner = planner
-        self.router = router
+        self.config = config or {}
+        self.qwen = qwen if qwen is not None else QwenClient(self.config)
+        self.planner = planner if planner is not None else Planner()
+        self.router = router if router is not None else build_router()
         self.memory = memory
         self.evaluator = evaluator
         self.trajectory_store = trajectory_store
-        self.config = config or {}
 
         self.max_iterations = self.config.get("max_iterations", 50)
         self.max_retries = self.config.get("max_retries_per_step", 3)
@@ -92,6 +92,7 @@ class AgentLoop:
         task: str,
         experiment_id: str | None = None,
         seed: int | None = None,
+        max_iterations: int | None = None,
     ) -> Episode:
         """Run the complete agent loop on a hardware design task.
 
@@ -100,6 +101,7 @@ class AgentLoop:
                   (e.g., "Design a 4-bit ALU with add, subtract, AND, OR")
             experiment_id: Optional immutable experiment ID
             seed: Optional centralized random seed for reproducibility
+            max_iterations: Optional override for max loop iterations
 
         Returns:
             Episode containing the full trajectory
@@ -108,6 +110,8 @@ class AgentLoop:
         import uuid
         from evaluator.physical_feasibility import PhysicalFeasibilityEngine
         from agent.schemas import FeasibilityLabel, TargetSpecification
+
+        effective_max_iterations = max_iterations if max_iterations is not None else self.max_iterations
 
         # Issue 56: Centralized seeding
         run_seed = seed if seed is not None else self.config.get("seed", 42)
@@ -145,65 +149,81 @@ class AgentLoop:
                     context = f"{context}\n\n[Research Evidence - {query}]\n{r_result.output[:1000]}"
 
         # Step 3: Execute the loop
-        while state.iteration < self.max_iterations:
+        while state.iteration < effective_max_iterations:
             state.iteration += 1
-            console.print(f"\n[bold]─── Iteration {state.iteration}/{self.max_iterations} ───[/]")
+            console.print(f"\n[bold]─── Iteration {state.iteration}/{effective_max_iterations} ───[/]")
 
             # 3a. Build context for this iteration
             iter_context = self._build_iteration_context(state, context)
 
             # 3b. Ask Qwen for the next action
             action = await self._get_next_action(state, iter_context)
-            # Check for completion with strict verification contract gate
+            # Check for completion with single mandatory end-to-end measured-success contract
             if action.action_type == ActionType.COMPLETE:
+                failed_contract_gates = []
+
+                # Gate 1: Synthesizable RTL exists and non-empty
                 has_rtl = bool(state.design_files and any(f.endswith((".sv", ".v")) for f in state.design_files))
-                has_sim = bool("functional" in state.verification_stages)
-                has_synth = bool("synthesis" in state.verification_stages)
+                if not has_rtl:
+                    failed_contract_gates.append("Missing synthesizable RTL (.sv or .v source)")
 
-                if not (has_rtl and (has_sim or has_synth)) and not self.config.get("allow_unverified_completion", False):
-                    console.print("[bold red]❌ Completion gate rejected: design requires verified RTL and simulation/synthesis before completion.[/]")
+                # Gate 2: Functional simulation verification pass
+                has_sim = "functional" in state.verification_stages
+                if not has_sim:
+                    failed_contract_gates.append("Missing functional simulation pass (Cocotb)")
+
+                # Gate 3: Logic synthesis with genuine cell count > 0
+                synth_data = state.verification_stages.get("synthesis", {})
+                has_synth = "synthesis" in state.verification_stages
+                synth_cells = 0
+                if isinstance(synth_data, dict):
+                    synth_cells = synth_data.get("cells", synth_data.get("cell_count", 0)) or 0
+                elif hasattr(synth_data, "cell_count"):
+                    synth_cells = synth_data.cell_count
+                if not has_synth or synth_cells <= 0:
+                    failed_contract_gates.append("Missing logic synthesis pass with measured cells > 0 (Yosys)")
+
+                # Gate 4: Formal verification check
+                has_formal = "formal" in state.verification_stages
+                if not has_formal:
+                    failed_contract_gates.append("Missing formal verification assertion check (SymbiYosys)")
+
+                # Gate 5: Physical feasibility envelope check
+                from evaluator.physical_feasibility import PhysicalFeasibilityEngine
+                from agent.schemas import TargetSpecification, FeasibilityLabel, HardwareArchitectureCandidate
+                phys_target = TargetSpecification()
+                phys_engine = PhysicalFeasibilityEngine(phys_target)
+                active_cand = getattr(state, "active_candidate", None)
+                if active_cand is None:
+                    active_cand = HardwareArchitectureCandidate(
+                        architecture_id=f"cand_eval_iter_{state.iteration}",
+                        task_id=state.task[:30].replace(" ", "_"),
+                        actual_synthesis_metrics={"cells": synth_cells} if synth_cells else {},
+                        parallelism=2,
+                        pipeline_depth=2,
+                    )
+                phys_report = phys_engine.evaluate_candidate(active_cand)
+                if phys_report.feasibility == FeasibilityLabel.INFEASIBLE_ESTIMATE:
+                    failed_contract_gates.append(f"Physical feasibility violated: {', '.join(phys_report.violations)}")
+
+                if failed_contract_gates:
+                    console.print(f"[bold red]❌ Single Mandatory Completion Contract Rejected ({len(failed_contract_gates)} gates failed):[/]")
+                    for gate_err in failed_contract_gates:
+                        console.print(f"  [red]• {gate_err}[/]")
                     result = ActionResult(
                         action=ActionType.COMPLETE,
                         status=ActionStatus.FAILURE,
-                        output="Completion rejected: Verification contract requires: (1) generated RTL, (2) simulation or synthesis pass.",
-                        errors=["Verification contract gate not satisfied"],
+                        output=f"Completion rejected by mandatory contract: {'; '.join(failed_contract_gates)}",
+                        errors=failed_contract_gates,
                     )
                     state.last_result = result
-                    retries += 1
-                    continue
-
-                # Issue 29: Formal Verification Gate Check
-                if self.config.get("require_formal_verification", False) and "formal" not in state.verification_stages:
-                    console.print("[bold red]❌ Completion gate rejected: formal verification pass is required before completion.[/]")
-                    result = ActionResult(
-                        action=ActionType.COMPLETE,
-                        status=ActionStatus.FAILURE,
-                        output="Completion rejected: Verification contract requires formal verification pass.",
-                        errors=["Formal verification missing"],
-                    )
-                    state.last_result = result
-                    retries += 1
-                    continue
-
-                # Issue 41: Physical Feasibility Gate on Critical Path
-                if getattr(state, "active_candidate", None) is not None:
-                    phys_engine = PhysicalFeasibilityEngine(TargetSpecification())
-                    phys_report = phys_engine.evaluate_candidate(state.active_candidate)
-                    if phys_report.feasibility == FeasibilityLabel.INFEASIBLE_ESTIMATE:
-                        console.print(f"[bold red]❌ Physical feasibility gate failed: {', '.join(phys_report.violations)}[/]")
-                        result = ActionResult(
-                            action=ActionType.COMPLETE,
-                            status=ActionStatus.FAILURE,
-                            output=f"Physical envelope violated: {phys_report.recommendation}",
-                            errors=phys_report.violations,
-                        )
-                        state.last_result = result
-                        retries = self.max_retries  # Force architectural escalation
-                        continue
+                    if any("Physical" in g for g in failed_contract_gates):
+                        retries = self.max_retries  # Force architectural redesign escalation
                     else:
-                        console.print(f"[bold green]✓ Physical feasibility verified: {phys_report.feasibility.value}[/]")
+                        retries += 1
+                    continue
 
-                console.print("[bold green]✓ Agent verified design and completed task[/]")
+                console.print("[bold green]✓ Single mandatory measured-success contract satisfied! Design verified end-to-end.[/]")
                 break
 
             # 3c. Execute the action
@@ -278,10 +298,15 @@ class AgentLoop:
             # 3j. Check early stopping based on normalized design quality achieved
             normalized_best = state.best_reward / 8.0 if state.best_reward > 1.0 else state.best_reward
             has_valid_rtl = bool(state.design_files and any(f.endswith((".sv", ".v")) for f in state.design_files))
-            if normalized_best >= self.early_stop_reward and has_valid_rtl:
+            if (
+                normalized_best >= self.early_stop_reward
+                and has_valid_rtl
+                and "functional" in state.verification_stages
+                and "synthesis" in state.verification_stages
+            ):
                 console.print(
                     f"[bold green]🎯 Early stop — normalized best reward {normalized_best:.3f} "
-                    f">= {self.early_stop_reward} with valid RTL[/]"
+                    f">= {self.early_stop_reward} with valid verified RTL[/]"
                 )
                 break
 

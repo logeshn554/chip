@@ -1,7 +1,7 @@
 """
 Cocotb Functional Verification Tool.
 
-Executes functional testbenches for SystemVerilog designs (such as the 8-bit signed MAC).
+Executes functional testbenches for general SystemVerilog designs.
 Returns structured pass/fail results and error details.
 """
 
@@ -278,8 +278,9 @@ class CocotbTool:
         rtl_path: str,
         testbench_path: Optional[str] = None,
         benchmark_task: Optional[Any] = None,
+        allow_mac_fallback: bool = False,
     ) -> dict[str, Any]:
-        """Run functional tests against the RTL."""
+        """Run functional tests against the RTL using general RTL simulation."""
         # Resolve rtl_path if given as relative or bare name
         resolved_rtl = rtl_path
         if not os.path.exists(resolved_rtl):
@@ -304,11 +305,35 @@ class CocotbTool:
         with open(resolved_rtl, "r", encoding="utf-8", errors="replace") as f:
             code = f.read()
 
+        # Extract top-level module name from RTL
+        mod_match = re.search(r"\bmodule\s+([a-zA-Z_][a-zA-Z0-9_]*)", code)
+        top_mod = mod_match.group(1) if mod_match else os.path.splitext(os.path.basename(resolved_rtl))[0]
+
+        # Auto-discover testbench matching top module if not specified or missing
+        resolved_tb = testbench_path
+        if not resolved_tb or not os.path.exists(resolved_tb):
+            candidate_tbs = [
+                testbench_path,
+                f"tests/test_{top_mod}.py",
+                f"tests/{top_mod}/test_{top_mod}.py",
+                f"rtl/generated/test_{top_mod}.py",
+                f"rtl/generated/testbenches/test_{top_mod}.py",
+                os.path.join(os.path.dirname(resolved_rtl), f"test_{top_mod}.py"),
+                os.path.join(os.path.dirname(resolved_rtl), f"{top_mod}_tb.py"),
+            ]
+            if "mac" in top_mod.lower():
+                candidate_tbs.append("tests/mac/test_mac.py")
+
+            for cand in candidate_tbs:
+                if cand and os.path.exists(cand):
+                    resolved_tb = cand
+                    break
+
         # 1. If an external testbench file exists, execute via pytest
-        if testbench_path and os.path.exists(testbench_path):
+        if resolved_tb and os.path.exists(resolved_tb):
             try:
                 proc = await asyncio.create_subprocess_exec(
-                    sys.executable, "-m", "pytest", testbench_path, "-v",
+                    sys.executable, "-m", "pytest", resolved_tb, "-v",
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=".",
@@ -332,7 +357,7 @@ class CocotbTool:
                         "tests_passed": max(1, n_passed),
                         "tests_failed": 0,
                         "error": "",
-                        "file": os.path.basename(testbench_path),
+                        "file": os.path.basename(resolved_tb),
                         "line": None,
                     }
                 else:
@@ -345,23 +370,46 @@ class CocotbTool:
                         "tests_passed": n_passed,
                         "tests_failed": max(1, n_failed),
                         "error": output[-400:],
-                        "file": os.path.basename(testbench_path),
+                        "file": os.path.basename(resolved_tb),
                         "line": None,
                     }
             except Exception as e:
-                logger.warning(f"Pytest execution failed ({e}), falling back to Python simulation.")
+                logger.warning(f"Pytest execution failed for {resolved_tb}: {e}")
 
         # 2. If benchmark task is specified, verify test vectors against it
         if benchmark_task is not None:
             return self.simulate_benchmark_task(code, benchmark_task)
 
-        # 3. Default deterministic MAC validator
-        return self.simulate_mac_python(code)
+        # 3. Explicit MAC fallback only if specifically requested for a MAC module
+        if allow_mac_fallback and "mac" in top_mod.lower():
+            return self.simulate_mac_python(code)
+
+        # 4. General RTL: No testbench found — return explicit failure (no MAC heuristic default)
+        return {
+            "stage": "cocotb",
+            "tool": "general_rtl_simulator",
+            "metric_type": "actual",
+            "status": "failed",
+            "tests_total": 0,
+            "tests_passed": 0,
+            "tests_failed": 1,
+            "error": f"No functional testbench found for RTL module '{top_mod}'. General RTL simulation requires an explicit testbench (e.g., test_{top_mod}.py) or benchmark specification.",
+            "file": os.path.basename(resolved_rtl),
+            "line": None,
+        }
 
     async def execute(self, **kwargs: Any) -> dict[str, Any]:
         """Strict tool entrypoint for RUN_COCOTB and RUN_TESTS."""
-        rtl_file = kwargs.get("rtl_file", kwargs.get("file_path", kwargs.get("filename", "mac.sv")))
-        tb_file = kwargs.get("testbench", kwargs.get("testbench_path", "tests/mac/test_mac.py"))
+        rtl_file = kwargs.get("rtl_file", kwargs.get("file_path", kwargs.get("filename", None)))
+        if not rtl_file:
+            for cand in ["./rtl/generated/top.sv", "./rtl/generated/mac.sv"]:
+                if os.path.exists(cand):
+                    rtl_file = cand
+                    break
+            if not rtl_file:
+                rtl_file = "top.sv"
+        tb_file = kwargs.get("testbench", kwargs.get("testbench_path", None))
         benchmark_task = kwargs.get("benchmark_task")
-        return await self.run_tests(rtl_file, tb_file, benchmark_task=benchmark_task)
+        allow_mac = kwargs.get("allow_heuristic_fallback", False) or kwargs.get("allow_mac_fallback", False)
+        return await self.run_tests(rtl_file, tb_file, benchmark_task=benchmark_task, allow_mac_fallback=allow_mac)
 

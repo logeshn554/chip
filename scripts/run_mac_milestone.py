@@ -6,7 +6,7 @@ Runs the autonomous self-evolving hardware design agent on:
 Startup Flow:
 1. Load configuration
 2. Verify Ollama server
-3. Verify qwen3:4b exists
+3. Verify qwen2.5:14b exists
 4. Test one real generation
 5. Start HardwareAgent
 6. Run episode
@@ -44,7 +44,7 @@ def load_agent_config() -> dict:
 
 
 def verify_ollama_and_model(base_url: str, model_name: str) -> None:
-    """Steps 2 & 3: Verify Ollama server and verify qwen3:4b exists."""
+    """Steps 2 & 3: Verify Ollama server and verify qwen2.5:14b exists."""
     url = f"{base_url.rstrip('/')}/api/tags"
     try:
         req = urllib.request.Request(url, method="GET")
@@ -76,9 +76,9 @@ def verify_ollama_and_model(base_url: str, model_name: str) -> None:
     )
 
     if not matched:
-        raise RuntimeError(f"Qwen3-4B is not installed in Ollama. Run: ollama pull {model_name}")
+        raise RuntimeError(f"Qwen-14B is not installed in Ollama. Run: ollama pull {model_name}")
 
-    print("Qwen3-4B: PASS")
+    print("Qwen-14B: PASS")
 
 
 async def test_generation(client: OllamaQwenClient) -> None:
@@ -108,7 +108,7 @@ async def main():
     print(f"LLM Model: {model_name}")
     print(f"Ollama URL: {base_url}")
 
-    # 2. Verify Ollama server & 3. Verify qwen3:4b exists
+    # 2. Verify Ollama server & 3. Verify qwen2.5:14b exists
     verify_ollama_and_model(base_url, model_name)
 
     # 4. Test one real generation

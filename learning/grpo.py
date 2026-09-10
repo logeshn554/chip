@@ -1,7 +1,7 @@
 """
 GRPO Trainer — Group Relative Policy Optimization with Hardware Environment Evaluation.
 
-Trains Qwen3-4B via policy optimization using genuine EDA verification feedback:
+Trains Qwen-14B via policy optimization using genuine EDA verification feedback:
 - Verilator syntax and lint (hard gate: compile failure = 0.0)
 - Cocotb functional verification pass rate
 - SymbiYosys formal assertion checking
@@ -117,8 +117,8 @@ class HardwareRewardEvaluator:
         evaluation_mode: str = "research_fast",
         require_exact_task: bool = False,
     ):
-        self.default_top_module = top_module or "mac"
-        self.default_test_file = test_file or "tests/mac/test_mac.py"
+        self.default_top_module = top_module or "top"
+        self.default_test_file = test_file or "tests/test_top.py"
         self.work_dir = work_dir
         self.target_cells = target_cells
         self.target_timing_ns = target_timing_ns
@@ -302,7 +302,7 @@ class HardwareRewardEvaluator:
         # Stage 2: Cocotb / testbench functional verification with benchmark task vectors
         func_res = await self.cocotb.run_tests(
             rtl_path,
-            testbench_path=test_file if (os.path.exists(test_file) and top_module == "mac") else None,
+            testbench_path=test_file if (test_file and os.path.exists(test_file)) else None,
             benchmark_task=task_obj,
         )
         total_tests = func_res.get("tests_total", 0)
@@ -458,7 +458,7 @@ class HardwareRewardEvaluator:
 
 
 class GRPOTrainer:
-    """Group Relative Policy Optimization for Qwen3-4B with Hardware Evaluator.
+    """Group Relative Policy Optimization for Qwen-14B with Hardware Evaluator.
 
     GRPO evaluates groups of G candidate responses per prompt against the real EDA
     environment concurrently, computes group-relative advantages, and updates policy weights.
@@ -467,7 +467,7 @@ class GRPOTrainer:
     def __init__(self, config: dict[str, Any] | None = None):
         config = config or {}
         self.config = config
-        self.model_name = config.get("model_name", "Qwen/Qwen3-4B")
+        self.model_name = config.get("model_name", "Qwen/Qwen2.5-14B-Instruct")
         self.group_size = config.get("group_size", 4)
         self.learning_rate = config.get("learning_rate", 1e-5)
         self.kl_coeff = config.get("kl_coeff", 0.1)

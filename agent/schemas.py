@@ -65,12 +65,17 @@ class ActionStatus(str, Enum):
 
 @dataclass
 class QwenResponse:
-    """Structured response from Qwen3-4B."""
+    """Structured response from Qwen-14B."""
     thinking: str = ""
     content: str = ""
     raw_output: str = ""
     tokens_used: int = 0
     generation_time_s: float = 0.0
+
+    @property
+    def text(self) -> str:
+        """Compatibility property matching LLMResponse.text."""
+        return self.content
 
 
 @dataclass

@@ -44,7 +44,7 @@ class YosysTool:
         except Exception:
             return "Yosys (version unknown)"
 
-    def _heuristic_lint_check(self, code: str, top_module: str = "mac") -> dict[str, Any]:
+    def _heuristic_lint_check(self, code: str, top_module: str = "top") -> dict[str, Any]:
         """Heuristic-only lint check using regex pattern matching.
 
         WARNING: This is NOT synthesis. Output values are rough heuristic guesses
@@ -92,7 +92,7 @@ class YosysTool:
                         dff_count += 32
                     elif "valid_out" in line:
                         dff_count += 1
-            dff_count = max(dff_count, 33 if "mac" in top_module.lower() else (8 if has_sequential else 0))
+            dff_count = max(dff_count, 8 if has_sequential else 0)
 
         # Detect arithmetic operations
         has_mult = "*" in code
@@ -104,7 +104,7 @@ class YosysTool:
         total_cells = dff_count + mult_cells + add_cells + misc_cells
         total_cells = max(total_cells, 10)
         logic_cells = max(0, total_cells - dff_count)
-        heuristic_area = round(total_cells * 3.14, 2)  # rough guess, NOT from synthesis
+        heuristic_area = float(total_cells)
 
         return {
             "stage": "yosys",
@@ -126,15 +126,15 @@ class YosysTool:
     async def synthesize(
         self,
         file_path: str,
-        top_module: str = "mac",
-        allow_heuristic_fallback: bool = True,
+        top_module: Optional[str] = None,
+        allow_heuristic_fallback: bool = False,
     ) -> dict[str, Any]:
         """Run Yosys synthesis script or internal synthesizability analysis.
         
         Args:
             file_path: Path to RTL source file.
-            top_module: Top-level module name.
-            allow_heuristic_fallback: If False, does not produce heuristic estimates
+            top_module: Top-level module name (auto-extracted from RTL if None).
+            allow_heuristic_fallback: If False (default), does not produce heuristic estimates
                 when Yosys is missing or fails (required for trustworthy RL/GRPO training).
         """
         # Resolve path
@@ -163,6 +163,11 @@ class YosysTool:
 
         with open(resolved_path, "r", encoding="utf-8", errors="replace") as f:
             code = f.read()
+
+        # Dynamically infer top module from code if not provided
+        mod_match = re.search(r"\bmodule\s+([a-zA-Z_][a-zA-Z0-9_]*)", code)
+        if not top_module:
+            top_module = mod_match.group(1) if mod_match else "top"
 
         if self._has_binary:
             ys_script = os.path.join(self.work_dir, f"synth_{top_module}.ys")
@@ -214,7 +219,7 @@ class YosysTool:
                         "logic_levels": logic_levels,
                         "critical_path_ns": critical_path_ns,
                         "area_cells": cells,
-                        "estimated_area": round(cells * 3.14, 2) if cells is not None else None,
+                        "estimated_area": float(cells) if cells is not None else None,
                         "power_estimate_uw": None,  # Grounded rule: no fake power numbers
                         "error": "",
                         "raw_log": output,
@@ -258,9 +263,16 @@ class YosysTool:
 
     async def execute(self, **kwargs: Any) -> dict[str, Any]:
         """Strict tool entrypoint for RUN_YOSYS and SYNTHESIZE."""
-        file_path = kwargs.get("file_path", kwargs.get("sources", kwargs.get("filename", "mac.sv")))
+        file_path = kwargs.get("file_path", kwargs.get("sources", kwargs.get("filename", None)))
         if isinstance(file_path, list):
-            file_path = file_path[0] if file_path else "mac.sv"
-        top_module = kwargs.get("top_module", "mac")
-        allow_heuristic = kwargs.get("allow_heuristic_fallback", True)
+            file_path = file_path[0] if file_path else None
+        if not file_path:
+            for cand in ["./rtl/generated/top.sv", "./rtl/generated/mac.sv"]:
+                if os.path.exists(cand):
+                    file_path = cand
+                    break
+            if not file_path:
+                file_path = "top.sv"
+        top_module = kwargs.get("top_module", None)
+        allow_heuristic = kwargs.get("allow_heuristic_fallback", False)
         return await self.synthesize(file_path, top_module, allow_heuristic_fallback=allow_heuristic)

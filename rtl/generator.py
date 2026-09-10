@@ -1,5 +1,5 @@
 """
-RTL Generator — uses Qwen3-4B to generate SystemVerilog modules.
+RTL Generator — uses Qwen-14B to generate SystemVerilog modules.
 
 Handles module generation, testbench creation, error fixing,
 and design optimization through prompt engineering with
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 class RTLGenerator:
-    """Generates SystemVerilog RTL using Qwen3-4B.
+    """Generates SystemVerilog RTL using Qwen-14B.
 
     Combines prompt templates, few-shot examples from design memory,
     and Jinja2 templates for common patterns to produce synthesizable

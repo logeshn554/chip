@@ -1,5 +1,5 @@
 """
-Agent State and Context Budgeting for Qwen3-4B.
+Agent State and Context Budgeting for Qwen-14B.
 
 Maintains bounded active context:
 CURRENT TASK
@@ -61,7 +61,7 @@ class AgentState:
 
     def build_model_context(self) -> str:
         """
-        Assemble the strictly bounded prompt context for Qwen3-4B:
+        Assemble the strictly bounded prompt context for Qwen-14B:
         CURRENT TASK
         +
         RELEVANT MEMORY

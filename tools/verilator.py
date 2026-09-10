@@ -200,7 +200,7 @@ class VerilatorTool:
         res["tool_version"] = "internal_fallback"
         return res
 
-    async def lint_and_compile(self, file_path: str, top_module: str = "mac") -> dict[str, Any]:
+    async def lint_and_compile(self, file_path: str, top_module: Optional[str] = None) -> dict[str, Any]:
         """Lint and compile SystemVerilog module."""
         return await self.lint(file_path)
 

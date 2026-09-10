@@ -153,7 +153,7 @@ class TestRLTransitionBuilder:
         ep = Episode(
             episode_id="ep_test_01",
             task="Design an 8-bit signed MAC.",
-            metadata={"model": "Qwen3-4B"},
+            metadata={"model": "Qwen-14B"},
             steps=[
                 TrajectoryStep(
                     step_index=0,

@@ -44,8 +44,8 @@ def main():
         min_ram_gb=8.0,               # 8GB LPDDR4x/5 minimum
         min_storage_gb=256.0,         # 256GB UFS storage
         interface_type="USB-C",
-        target_model_name="Qwen3-4B-INT4",
-        target_model_params_b=4.0,
+        target_model_name="Qwen-14B-INT4",
+        target_model_params_b=14.0,
         weight_bits=4,
         min_tokens_per_sec=12.0,      # Interactive decoding target
     )

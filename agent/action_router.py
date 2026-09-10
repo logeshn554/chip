@@ -311,7 +311,7 @@ def build_router(
 
     # ── 0. ARCHITECTURE SEARCH ───────────────────────────────────────
     async def handle_propose_architecture(params: dict) -> ActionResult:
-        task_id = str(params.get("task_id", params.get("task", "mac")))
+        task_id = str(params.get("task_id", params.get("task", "hardware_design")))
         task_desc = str(params.get("description", params.get("task", "Hardware design task")))
         n = int(params.get("n", params.get("candidates", 4)))
         cands = search_engine.propose_candidates(task_id=task_id, task_description=task_desc, n=n)
@@ -665,8 +665,8 @@ def build_router(
     # ── 8. RUN_SIMULATION ────────────────────────────────────────────
     if verilator is not None:
         async def handle_run_sim(params: dict) -> ActionResult:
-            sources = params.get("sources", [params.get("file_path", params.get("filename", "mac.sv"))])
-            top_module = params.get("top_module", "mac")
+            sources = params.get("sources", [params.get("file_path", params.get("filename", "top.sv"))])
+            top_module = params.get("top_module", None)
 
             if isinstance(sources, str):
                 sources = [sources]
@@ -701,10 +701,11 @@ def build_router(
     # ── 9. RUN_TESTS ─────────────────────────────────────────────────
     if cocotb is not None:
         async def handle_run_tests(params: dict) -> ActionResult:
-            rtl_file = params.get("rtl_file", params.get("file_path", "mac.sv"))
-            tb_file = params.get("testbench", "test_mac.py")
+            rtl_file = params.get("rtl_file", params.get("file_path", "top.sv"))
+            tb_file = params.get("testbench", params.get("testbench_path", None))
+            allow_mac = params.get("allow_heuristic_fallback", False)
 
-            res = await cocotb.execute(rtl_file=rtl_file, testbench=tb_file)
+            res = await cocotb.execute(rtl_file=rtl_file, testbench=tb_file, allow_heuristic_fallback=allow_mac)
             status = ActionStatus.SUCCESS if res.get("status") == "passed" else ActionStatus.FAILURE
 
             return ActionResult(
@@ -725,12 +726,13 @@ def build_router(
     # ── 10. SYNTHESIZE ───────────────────────────────────────────────
     if yosys is not None:
         async def handle_synthesize(params: dict) -> ActionResult:
-            file_path = params.get("file_path", params.get("sources", "mac.sv"))
+            file_path = params.get("file_path", params.get("sources", "top.sv"))
             if isinstance(file_path, list):
-                file_path = file_path[0] if file_path else "mac.sv"
-            top_module = params.get("top_module", "mac")
+                file_path = file_path[0] if file_path else "top.sv"
+            top_module = params.get("top_module", None)
+            allow_heuristic = params.get("allow_heuristic_fallback", False)
 
-            res = await yosys.synthesize(file_path=file_path, top_module=top_module)
+            res = await yosys.synthesize(file_path=file_path, top_module=top_module, allow_heuristic_fallback=allow_heuristic)
             status = ActionStatus.SUCCESS if res.get("status") == "passed" else ActionStatus.FAILURE
 
             return ActionResult(
@@ -753,8 +755,8 @@ def build_router(
     formal_tool = formal or FormalVerificationTool()
 
     async def handle_formal(params: dict) -> ActionResult:
-        file_path = params.get("file_path", "mac.sv")
-        top_module = params.get("top_module", "mac")
+        file_path = params.get("file_path", "top.sv")
+        top_module = params.get("top_module", None)
         res = await formal_tool.verify(file_path=file_path, top_module=top_module)
 
         status = ActionStatus.SUCCESS if res.get("status") == "PASS" else (
@@ -805,9 +807,9 @@ def build_router(
 
     # ── 13. SAVE_DESIGN ──────────────────────────────────────────────
     async def handle_save_design(params: dict) -> ActionResult:
-        from memory.design_store import DesignStore
+        from memory.design_store import DesignRecord, DesignStore
         ds = design_store or DesignStore()
-        name = params.get("design_name", params.get("name", "mac"))
+        name = params.get("design_name", params.get("name", "design"))
         version = params.get("version", "v1.0")
         rtl_code = params.get("rtl_code", "")
 
@@ -817,20 +819,22 @@ def build_router(
             with open(dest_path, "w", encoding="utf-8") as f:
                 f.write(rtl_code)
 
-        rec = ds.save_design(
-            name=name,
+        record = DesignRecord(
+            design_id=f"{name}_{version}",
+            module_name=name,
             version=version,
-            rtl_path=dest_path,
-            testbench_path="",
-            synthesis_metrics=params.get("metrics", {}),
+            rtl_source=rtl_code,
+            synthesis_results=params.get("metrics", {}),
             reward=float(params.get("reward", 0.0)),
         )
+        key = ds.save_design(record)
 
         return ActionResult(
             action=ActionType.SAVE_DESIGN,
             status=ActionStatus.SUCCESS,
-            output=f"Design {name}@{version} saved to catalog (id: {rec.design_id})",
+            output=f"Design {name}@{version} saved to catalog (key: {key})",
             artifacts={"design": dest_path},
+            metrics={"version": version, "name": name},
         )
 
     router.register(ActionType.SAVE_DESIGN, handle_save_design)

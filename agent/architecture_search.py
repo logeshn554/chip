@@ -1175,9 +1175,42 @@ class ArchitectureSearchEngine:
             child.pareto_metrics["area"] = float(child.estimated_resource_requirements["target_cells"])
             child.architecture_description += " [MUTATED: Time-multiplexed shared multiplier IP]"
 
-        else:  # Generic MUTATE
+        else:  # Open-ended LLM or custom dynamic mutation
             child.pipeline_depth = max(1, child.pipeline_depth)
             child.architecture_description += f" [MUTATED: {op_str}]"
+
+        # Apply open-ended LLM/dynamic parameters if provided
+        if extra_params:
+            for field_name in (
+                "datapath_structure",
+                "parallelism",
+                "pipeline_depth",
+                "memory_organization",
+                "buffering_strategy",
+                "arithmetic_strategy",
+                "interface_strategy",
+                "rtl_implementation",
+                "architecture_description",
+            ):
+                if field_name in extra_params and extra_params[field_name] is not None:
+                    setattr(child, field_name, extra_params[field_name])
+
+            if "components" in extra_params and isinstance(extra_params["components"], list):
+                child.components = list(extra_params["components"])
+            if "interfaces" in extra_params and isinstance(extra_params["interfaces"], list):
+                child.interfaces = list(extra_params["interfaces"])
+            if "memory_hierarchy" in extra_params and isinstance(extra_params["memory_hierarchy"], dict):
+                child.memory_hierarchy.update(extra_params["memory_hierarchy"])
+            if "compute_units" in extra_params and isinstance(extra_params["compute_units"], dict):
+                child.compute_units.update(extra_params["compute_units"])
+            if "accelerator_structure" in extra_params and isinstance(extra_params["accelerator_structure"], dict):
+                child.accelerator_structure.update(extra_params["accelerator_structure"])
+            if "estimated_resource_requirements" in extra_params and isinstance(extra_params["estimated_resource_requirements"], dict):
+                child.estimated_resource_requirements.update(extra_params["estimated_resource_requirements"])
+            if "estimated_constraints" in extra_params and isinstance(extra_params["estimated_constraints"], dict):
+                child.estimated_constraints.update(extra_params["estimated_constraints"])
+            if "pareto_metrics" in extra_params and isinstance(extra_params["pareto_metrics"], dict):
+                child.pareto_metrics.update(extra_params["pareto_metrics"])
 
         # TRUTHFULNESS: Mutated candidate is a hypothesis until empirically verified.
         # Tag all metric values as HYPOTHESIS with low initial confidence.
@@ -1201,6 +1234,133 @@ class ArchitectureSearchEngine:
             )
             self.pareto_frontier.add(child)
         return child
+
+    def generate_open_ended_hypothesis(
+        self,
+        task_id: str,
+        task_description: str = "",
+        llm_proposal: Optional[dict[str, Any]] = None,
+        target_spec: Optional[TargetSpecification] = None,
+        generation: int = 0,
+    ) -> HardwareArchitectureCandidate:
+        """Create an open-ended, unrestricted architecture hypothesis directly from LLM generation."""
+        import time
+        spec = target_spec or TargetSpecification()
+        prop = llm_proposal or {}
+        h = abs(hash(f"{task_id}_{task_description}_{generation}_{time.time()}")) % 10000
+        arch_id = prop.get("architecture_id", f"arch_{task_id}_llm_{h:04d}")
+
+        cand = HardwareArchitectureCandidate(
+            architecture_id=arch_id,
+            task_id=task_id,
+            generation=generation,
+            mutation_type=prop.get("mutation_type", "open_ended_llm_proposal"),
+            specification_version="2.0",
+            architecture_description=prop.get("description", prop.get("architecture_description", f"LLM-generated architecture for {task_id}: {task_description}")),
+            components=prop.get("components", [
+                {"name": "core_processing_unit", "type": prop.get("datapath_structure", "custom_datapath"), "clock_mhz": prop.get("clock_mhz", 300), "area_cells": prop.get("cells", 2500)}
+            ]),
+            interfaces=prop.get("interfaces", ["AXI4-Stream", "APB"]),
+            memory_hierarchy=prop.get("memory_hierarchy", {
+                "local_sram_kb": prop.get("sram_kb", 128),
+                "buffering": prop.get("buffering_strategy", "ping_pong_stream"),
+            }),
+            compute_units=prop.get("compute_units", {
+                "parallelism": prop.get("parallelism", 4),
+                "pipeline_depth": prop.get("pipeline_depth", 2),
+                "arithmetic": prop.get("arithmetic_strategy", "int8_mac"),
+            }),
+            accelerator_structure=prop.get("accelerator_structure", {}),
+            datapath_structure=prop.get("datapath_structure", "custom_open_ended_datapath"),
+            pipeline_depth=int(prop.get("pipeline_depth", 2)),
+            parallelism=int(prop.get("parallelism", 4)),
+            memory_organization=prop.get("memory_organization", "banked_local_memory"),
+            buffering_strategy=prop.get("buffering_strategy", "stream_buffer"),
+            arithmetic_strategy=prop.get("arithmetic_strategy", "custom_arithmetic"),
+            interface_strategy=prop.get("interface_strategy", "stream_interface"),
+            rtl_implementation=prop.get("rtl_implementation", ""),
+            estimated_resource_requirements=prop.get("estimated_resource_requirements", {
+                "target_cells": prop.get("target_cells", 3000),
+                "estimated_latency_cycles": prop.get("pipeline_depth", 2),
+            }),
+            actual_synthesis_metrics={},
+            estimated_constraints=prop.get("estimated_constraints", {
+                "power_w": prop.get("power_w", 2.0),
+                "junction_temp_c": spec.ambient_temp_c + (prop.get("power_w", 2.0) * spec.thermal_resistance_c_per_w),
+                "pcb_area_mm2": prop.get("pcb_area_mm2", 800.0),
+                "tokens_per_sec": prop.get("tokens_per_sec", 15.0),
+                "ram_gb": spec.min_ram_gb,
+            }),
+            measured_constraints={},
+            verification_status="unverified",
+            reward=0.0,
+            is_hypothesis=True,
+            validation_status="UNVERIFIED",
+            custom_chip=prop.get("custom_chip", True),
+            chip_generation=prop.get("chip_generation", 1),
+            pareto_metrics=prop.get("pareto_metrics", {
+                "area": float(prop.get("target_cells", 3000)),
+                "power": float(prop.get("power_w", 2.0)),
+                "timing": float(prop.get("pipeline_depth", 2)),
+                "throughput": float(prop.get("tokens_per_sec", 15.0)),
+                "memory": float(spec.min_ram_gb),
+                "thermal": float(spec.ambient_temp_c + (prop.get("power_w", 2.0) * spec.thermal_resistance_c_per_w)),
+                "physical_size": float(prop.get("pcb_area_mm2", 800.0)),
+            }),
+            metrics=MetricSet(),
+            metadata=prop.get("metadata", {"source": "open_ended_llm_generator"}),
+        )
+        for k, v in cand.pareto_metrics.items():
+            if v is not None:
+                cand.metrics.set_metric(
+                    k,
+                    float(v),
+                    status=InformationClass.HYPOTHESIS,
+                    source="open_ended_llm_generator",
+                    method="llm_hypothesis",
+                    confidence=0.1,
+                )
+        self.genealogy.register_candidate(cand, mutation_type="open_ended_llm_proposal")
+        self.pareto_frontier.add(cand)
+        return cand
+
+    async def propose_candidates_with_llm(
+        self,
+        task_id: str,
+        task_description: str = "",
+        qwen_client: Optional[Any] = None,
+        n: int = 4,
+        target_spec: Optional[TargetSpecification] = None,
+    ) -> list[HardwareArchitectureCandidate]:
+        """Propose candidates through unrestricted LLM generation or fall back to diverse proposal."""
+        if qwen_client is not None and hasattr(qwen_client, "generate_structured"):
+            candidates = []
+            prompt = (
+                f"You are a hardware architecture search engine. Design {n} diverse, novel architectural "
+                f"hypotheses for task '{task_id}': {task_description}.\n"
+                f"For each architecture, propose novel datapath, pipeline depth, parallelism, buffering, "
+                f"and arithmetic strategy beyond static templates. Return JSON with 'candidates': [...] list."
+            )
+            try:
+                res = await qwen_client.generate_structured([
+                    {"role": "system", "content": "Return JSON with a 'candidates' list of architectural specifications."},
+                    {"role": "user", "content": prompt}
+                ])
+                raw_cands = res.get("candidates", []) if isinstance(res, dict) else []
+                for prop in raw_cands[:n]:
+                    if isinstance(prop, dict):
+                        cand = self.generate_open_ended_hypothesis(
+                            task_id=task_id,
+                            task_description=task_description,
+                            llm_proposal=prop,
+                            target_spec=target_spec,
+                        )
+                        candidates.append(cand)
+                if len(candidates) >= n:
+                    return candidates
+            except Exception as e:
+                logger.warning(f"LLM architectural proposal failed ({e}), using baseline engine.")
+        return self.propose_candidates(task_id, task_description, n=n, target_spec=target_spec)
 
     def mutate_candidate(
         self,
