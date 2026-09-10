@@ -52,8 +52,23 @@ class KnowledgeStore:
             metadata={"description": "Hardware design technical knowledge and specs"},
         )
         # Pre-seed essential knowledge if empty
-        if self.collection.count() == 0:
-            self._seed_default_knowledge()
+        try:
+            if self.collection.count() == 0:
+                self._seed_default_knowledge()
+        except Exception as e:
+            logger.warning(f"Incompatible or corrupted Chroma collection detected ({e}). Re-creating collection.")
+            try:
+                self.client.delete_collection("hardware_knowledge")
+            except Exception:
+                pass
+            self.collection = self.client.get_or_create_collection(
+                name="hardware_knowledge",
+                metadata={"description": "Hardware design technical knowledge and specs"},
+            )
+            try:
+                self._seed_default_knowledge()
+            except Exception as e2:
+                logger.warning(f"Could not re-seed knowledge store: {e2}")
 
     def _seed_default_knowledge(self) -> None:
         """Seed core SystemVerilog and MAC design guidelines."""

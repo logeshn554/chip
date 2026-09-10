@@ -116,8 +116,23 @@ class ExperienceStore:
             name="hardware_experience",
             metadata={"description": "Records of past hardware errors, fixes, and rewards"},
         )
-        if self.collection.count() == 0:
-            self._seed_common_experiences()
+        try:
+            if self.collection.count() == 0:
+                self._seed_common_experiences()
+        except Exception as e:
+            logger.warning(f"Incompatible or corrupted Chroma collection detected ({e}). Re-creating collection.")
+            try:
+                self.client.delete_collection("hardware_experience")
+            except Exception:
+                pass
+            self.collection = self.client.get_or_create_collection(
+                name="hardware_experience",
+                metadata={"description": "Records of past hardware errors, fixes, and rewards"},
+            )
+            try:
+                self._seed_common_experiences()
+            except Exception as e2:
+                logger.warning(f"Could not re-seed experience store: {e2}")
 
     def _seed_common_experiences(self) -> None:
         """Seed known SystemVerilog MAC failure modes and their corrections."""
