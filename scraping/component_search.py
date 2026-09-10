@@ -199,18 +199,55 @@ class ComponentSearchEngine:
         elif re.search(r"\bPCIe\b|\bAXI\b", raw_text, re.IGNORECASE):
             interface = "PCIe / AXI"
 
-        # Part number extraction
-        pn_match = re.search(r"\b([A-Z0-9]{5,15}(?:-[A-Z0-9]+)?)\b", raw_text)
-        part_number = pn_match.group(1) if pn_match else f"GENERIC_{category_hint.upper()}"
+        # Verified manufacturer identification
+        manufacturer = "UNKNOWN"
+        domain_lower = urllib.parse.urlparse(source_url).netloc.lower()
+        KNOWN_MFR_MAP = {
+            "ti.com": "Texas Instruments",
+            "microchip.com": "Microchip Technology",
+            "samsung.com": "Samsung Electronics",
+            "micron.com": "Micron Technology",
+            "st.com": "STMicroelectronics",
+            "analog.com": "Analog Devices",
+            "nxp.com": "NXP Semiconductors",
+            "infineon.com": "Infineon Technologies",
+            "intel.com": "Intel",
+            "amd.com": "AMD",
+            "qualcomm.com": "Qualcomm",
+            "renesas.com": "Renesas Electronics",
+            "skhynix.com": "SK Hynix",
+            "realtek.com": "Realtek",
+            "hailo.ai": "Hailo",
+            "kneron.com": "Kneron",
+        }
+        for d_key, m_name in KNOWN_MFR_MAP.items():
+            if d_key in domain_lower or m_name.lower() in raw_text.lower():
+                manufacturer = m_name
+                break
+
+        # Part number extraction: require realistic commercial format (mix of letters and numbers)
+        EXCLUDED_WORDS = {"DESIGN", "MODULE", "BUFFER", "FAST_ALU", "SYSTEM", "GENERIC", "MEMORY", "PACKAGE", "DEVICE", "OUTPUT", "INPUT"}
+        pn_candidates = re.findall(r"\b([A-Z][A-Z0-9]{3,14}(?:-[A-Z0-9]+)?)\b", raw_text)
+        valid_pns = [
+            p for p in pn_candidates
+            if any(c.isdigit() for c in p) and any(c.isalpha() for c in p) and p not in EXCLUDED_WORDS
+        ]
+        part_number = valid_pns[0] if valid_pns else f"UNVERIFIED_{category_hint.upper()}"
 
         comp_id = f"comp_{part_number.lower()}_{abs(hash(source_url)) % 10000:04d}"
+        is_authoritative_datasheet = bool(
+            "datasheet" in source_url.lower()
+            or source_url.endswith(".pdf")
+            or any(m_domain in domain_lower for m_domain in AUTHORITATIVE_MANUFACTURERS)
+        )
+        datasheet_url = source_url if is_authoritative_datasheet else None
 
         comp = ComponentEvidence(
             component_id=comp_id,
-            manufacturer="Identified Manufacturer",
+            manufacturer=manufacturer,
             part_number=part_number,
             category=category_hint,
-            datasheet_url=source_url if "datasheet" in source_url.lower() or source_url.endswith(".pdf") else None,
+            datasheet_url=datasheet_url,
             source_urls=[source_url],
             package=package,
             length_mm=length_mm,
@@ -229,6 +266,7 @@ class ComponentSearchEngine:
                 "detected_dimensions": f"{length_mm}x{width_mm}mm" if length_mm and width_mm else "unknown",
                 "detected_power": f"{power_w}W" if power_w else "unknown",
                 "detected_interface": interface,
+                "authoritative_datasheet": is_authoritative_datasheet,
             },
             raw_evidence=raw_text[:400].strip(),
         )
@@ -287,3 +325,35 @@ class ComponentSearchEngine:
             else:
                 result[cat] = None
         return result
+
+    def resolve_evidence_conflicts(
+        self,
+        candidates: list[ComponentEvidence],
+    ) -> list[ComponentEvidence]:
+        """Resolve contradictions across multiple scraped sources for the same component."""
+        by_part: dict[str, list[ComponentEvidence]] = {}
+        for c in candidates:
+            by_part.setdefault(c.part_number, []).append(c)
+
+        resolved: list[ComponentEvidence] = []
+        for part, records in by_part.items():
+            if len(records) == 1:
+                resolved.append(records[0])
+                continue
+
+            # Prioritize authoritative manufacturer datasheet records
+            sorted_records = sorted(records, key=lambda r: (bool(r.datasheet_url), r.confidence), reverse=True)
+            primary = sorted_records[0]
+
+            # Check for conflicting power or voltage specifications
+            powers = [r.power_w for r in records if r.power_w is not None]
+            if len(set(powers)) > 1:
+                logger.warning(
+                    f"Conflicting power ratings for {part}: {powers}. "
+                    f"Adopting authoritative source value {primary.power_w}W from {primary.datasheet_url or primary.source_urls[0]}"
+                )
+                primary.extracted_specification["conflict_resolved_power"] = powers
+
+            resolved.append(primary)
+
+        return resolved

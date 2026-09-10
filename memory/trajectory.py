@@ -21,21 +21,92 @@ logger = logging.getLogger(__name__)
 
 
 class TrajectoryStore:
-    """Persistent storage for agent trajectory episodes.
+    """Persistent storage for agent trajectory episodes and training records.
 
     Format: JSON Lines (.jsonl) — one line per episode.
     Each episode contains the full sequence of steps with
     state summaries, actions, observations, and rewards.
     """
 
-    def __init__(self, config: dict[str, Any] | None = None):
-        config = config or {}
-        self.store_dir = config.get("store_dir", "./trajectories")
-        self.format = config.get("format", "jsonl")
+    def __init__(self, config_or_dir: dict[str, Any] | str | None = None):
+        if isinstance(config_or_dir, str):
+            self.store_dir = config_or_dir
+            self.format = "jsonl"
+        elif isinstance(config_or_dir, dict):
+            self.store_dir = config_or_dir.get("store_dir", config_or_dir.get("log_dir", "./trajectories"))
+            self.format = config_or_dir.get("format", "jsonl")
+        else:
+            self.store_dir = "./trajectories"
+            self.format = "jsonl"
 
+        self.log_dir = self.store_dir
+        self.log_file = os.path.join(self.store_dir, "trajectories.jsonl")
         os.makedirs(self.store_dir, exist_ok=True)
 
         logger.info(f"TrajectoryStore: dir={self.store_dir}")
+
+    # ── Trajectory & Record API (Compatible with all runtime callers) ─
+
+    def save_trajectory(
+        self,
+        task: str,
+        steps: list[Any],
+        reward: float,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        """Persist a finished episode trajectory to JSONL."""
+        from llm.interface import get_default_model
+        h = abs(hash(task + str(time.time()))) % 1000000
+        traj_id = f"traj_{h:06d}"
+        cleaned_steps = []
+        for s in steps:
+            if hasattr(s, "to_clean_dict"):
+                cleaned_steps.append(s.to_clean_dict())
+            elif isinstance(s, dict):
+                cleaned_steps.append(s)
+            elif hasattr(s, "action"):
+                cleaned_steps.append({
+                    "action": getattr(s, "action", ""),
+                    "result": getattr(s, "observation", ""),
+                    "reward": getattr(s, "reward", 0.0),
+                })
+
+        meta = metadata or {}
+        record = {
+            "trajectory_id": traj_id,
+            "task": task,
+            "steps": cleaned_steps,
+            "reward": round(reward, 4),
+            "timestamp": time.time(),
+            "provider": meta.get("provider", "ollama"),
+            "model": meta.get("model", get_default_model()),
+            "fallback_used": meta.get("fallback_used", False),
+            "rtl_source": meta.get("rtl_source", "qwen"),
+            "metadata": meta,
+        }
+
+        with open(self.log_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+
+        logger.info(f"Trajectory recorded: {traj_id} (Reward: {reward}, Steps: {len(cleaned_steps)})")
+        return traj_id
+
+    def list_trajectories(self, min_reward: float = 0.0) -> list[dict[str, Any]]:
+        """Read and return trajectories, optionally filtered by reward."""
+        if not os.path.exists(self.log_file):
+            return []
+
+        results = []
+        with open(self.log_file, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    try:
+                        item = json.loads(line)
+                        if item.get("reward", 0.0) >= min_reward:
+                            results.append(item)
+                    except Exception:
+                        continue
+        return results
 
     # ── Episode Management ───────────────────────────────────────────
 

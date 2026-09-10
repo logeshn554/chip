@@ -37,10 +37,12 @@ class CocotbTool:
         - Accumulation sequence across 5 clock cycles
         - Reset & Clear assertion
         """
-        # First verify that the SV code uses signed qualifiers
+        # Fallback Python MAC model - explicitly tagged as heuristic
         if "signed" not in sv_code:
             return {
                 "stage": "cocotb",
+                "tool": "python_heuristic_model",
+                "metric_type": "heuristic",
                 "status": "failed",
                 "tests_total": 8,
                 "tests_passed": 1,
@@ -54,6 +56,8 @@ class CocotbTool:
         if "+" not in sv_code or "acc" not in sv_code:
             return {
                 "stage": "cocotb",
+                "tool": "python_heuristic_model",
+                "metric_type": "heuristic",
                 "status": "failed",
                 "tests_total": 8,
                 "tests_passed": 0,
@@ -83,6 +87,8 @@ class CocotbTool:
                 failed += 1
                 return {
                     "stage": "cocotb",
+                    "tool": "python_heuristic_model",
+                    "metric_type": "heuristic",
                     "status": "failed",
                     "tests_total": len(test_vectors),
                     "tests_passed": passed,
@@ -94,6 +100,8 @@ class CocotbTool:
 
         return {
             "stage": "cocotb",
+            "tool": "python_heuristic_model",
+            "metric_type": "heuristic",
             "status": "passed",
             "tests_total": len(test_vectors),
             "tests_passed": passed,
@@ -317,6 +325,8 @@ class CocotbTool:
                 if proc.returncode == 0:
                     return {
                         "stage": "cocotb",
+                        "tool": "cocotb_simulator",
+                        "metric_type": "actual",
                         "status": "passed",
                         "tests_total": max(1, total),
                         "tests_passed": max(1, n_passed),
@@ -328,6 +338,8 @@ class CocotbTool:
                 else:
                     return {
                         "stage": "cocotb",
+                        "tool": "cocotb_simulator",
+                        "metric_type": "actual",
                         "status": "failed",
                         "tests_total": max(1, total),
                         "tests_passed": n_passed,

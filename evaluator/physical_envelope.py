@@ -121,8 +121,10 @@ class PhysicalEnvelopeModel:
         estimated_junction_temp = ambient_temp + (total_device_power * theta_ja)
 
         # 4. Performance & Token Throughput Model
-        # Target model: Qwen3-4B-INT4 -> 4.0B params * 0.5 bytes = 2.0 GB per full model read
-        model_size_gb = (self.envelope.target_model_params_b * self.envelope.weight_bits) / 8.0
+        # Parameterizable target model workload scaling:
+        params_b = getattr(self.envelope, "target_model_params_b", 14.0)
+        weight_bits = getattr(self.envelope, "weight_bits", 4)
+        model_size_gb = (params_b * weight_bits) / 8.0
         
         # Effective memory bandwidth: 32-bit LPDDR4x-4266 -> ~34.1 GB/s peak, 75% efficiency -> ~25.6 GB/s
         effective_mem_bw_gbps = 25.6
@@ -146,8 +148,9 @@ class PhysicalEnvelopeModel:
             mac_units = parallelism * 64
 
         compute_tops = (2.0 * mac_units * (base_clock_mhz * 1e6)) / 1e12
-        # For INT4 decode: ~8 Giga-Ops per token for 4B model
-        compute_tokens_per_sec = (compute_tops * 1000.0) / 8.0
+        # Dynamic operations per token: 2.0 * parameters (Giga-Ops)
+        giga_ops_per_token = max(0.1, 2.0 * params_b)
+        compute_tokens_per_sec = (compute_tops * 1000.0) / giga_ops_per_token
 
         # Bottleneck throughput
         achievable_tokens_per_sec = min(memory_tokens_per_sec, compute_tokens_per_sec)

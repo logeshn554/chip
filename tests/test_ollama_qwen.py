@@ -41,17 +41,17 @@ class MockHttpResponse:
 @pytest.fixture
 def ollama_client():
     return OllamaQwenClient(
-        model="qwen3:4b",
+        model="qwen2.5:14b",
         base_url="http://localhost:11434",
         mock_mode=False,
     )
 
 
-def test_ollama_available_and_qwen3_available(ollama_client):
-    """Test model verification when Ollama is reachable and qwen3:4b is present."""
+def test_ollama_available_and_qwen_available(ollama_client):
+    """Test model verification when Ollama is reachable and qwen2.5:14b is present."""
     tags_payload = json.dumps({
         "models": [
-            {"name": "qwen3:4b", "model": "qwen3:4b"},
+            {"name": "qwen2.5:14b", "model": "qwen2.5:14b"},
             {"name": "llama3:latest", "model": "llama3"},
         ]
     }).encode("utf-8")
@@ -75,7 +75,7 @@ async def test_ollama_generation_success(ollama_client):
         resp = await ollama_client.generate("Design a MAC unit")
         assert "module mac" in resp.text
         assert resp.metadata["provider"] == "ollama"
-        assert resp.metadata["model"] == "qwen3:4b"
+        assert resp.metadata["model"] == "qwen2.5:14b"
         assert resp.metadata["fallback_used"] is False
         assert resp.prompt_tokens == 10
         assert resp.completion_tokens == 25
@@ -86,7 +86,7 @@ def test_ollama_unavailable(ollama_client):
     url_err = urllib.error.URLError("Connection refused")
 
     with patch("urllib.request.urlopen", side_effect=url_err):
-        with pytest.raises(RuntimeError, match="Cannot connect to Ollama at http://localhost:11434"):
+        with pytest.raises(RuntimeError, match="Ollama server is unreachable"):
             ollama_client.verify_model_installed()
 
 
@@ -100,8 +100,8 @@ async def test_ollama_generation_unavailable(ollama_client):
             await ollama_client.generate("Design a MAC")
 
 
-def test_qwen3_4b_unavailable(ollama_client):
-    """Test verification failure when qwen3:4b is not in /api/tags."""
+def test_qwen_unavailable(ollama_client):
+    """Test verification failure when model is not in /api/tags."""
     tags_payload = json.dumps({
         "models": [
             {"name": "deepseek-coder:6.7b", "model": "deepseek-coder"},
@@ -110,7 +110,7 @@ def test_qwen3_4b_unavailable(ollama_client):
     }).encode("utf-8")
 
     with patch("urllib.request.urlopen", return_value=MockHttpResponse(tags_payload)):
-        with pytest.raises(RuntimeError, match="Qwen3-4B is not installed in Ollama"):
+        with pytest.raises(RuntimeError, match="is not installed in Ollama"):
             ollama_client.verify_model_installed()
 
 

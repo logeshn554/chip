@@ -102,6 +102,8 @@ async def _run_agent(task: str, config: dict, prompts: dict):
     from rtl.generator import RTLGenerator
     from tools.verilator import VerilatorTool
     from tools.yosys import YosysTool
+    from tools.cocotb import CocotbTool
+    from tools.formal import FormalVerificationTool
     from evaluator.reward import RewardEngine
 
     console.print("[bold cyan]Initializing Self-Evolving Chip Agent...[/]\n")
@@ -122,6 +124,8 @@ async def _run_agent(task: str, config: dict, prompts: dict):
     tools_config = config.get("tools", {})
     verilator = VerilatorTool(tools_config.get("verilator", {}))
     yosys = YosysTool(tools_config.get("yosys", {}))
+    cocotb = CocotbTool(tools_config.get("cocotb", {}).get("sim_dir", "./sim_build"))
+    formal = FormalVerificationTool(tools_config.get("formal", {}).get("sby_binary", "sby"))
 
     # Build action router
     router = build_router(
@@ -130,6 +134,8 @@ async def _run_agent(task: str, config: dict, prompts: dict):
         memory_system=memory,
         verilator=verilator,
         yosys=yosys,
+        cocotb=cocotb,
+        formal=formal,
     )
 
     planner = Planner(qwen=qwen, prompts=prompts)

@@ -454,6 +454,8 @@ class HardwareArchitectureCandidate:
     mutation_type: str = "initial"
     specification_version: str = "1.0"
     architecture_description: str = ""
+    evidence_ids: list[str] = field(default_factory=list)
+    research_rationale: str = ""
     components: list[Any] = field(default_factory=list)  # list[ComponentEvidence]
     interfaces: list[str] = field(default_factory=list)
     memory_hierarchy: dict[str, Any] = field(default_factory=dict)
@@ -554,7 +556,7 @@ class Episode:
     completed_at: float | None = None
     # Rigorous experiment and model provenance tracking
     experiment_id: str = ""
-    model_id: str = "qwen3:4b"
+    model_id: str = "qwen2.5:14b"
     model_version: str = "1.0"
     adapter_version: str = ""
     task_id: str = ""
@@ -601,6 +603,8 @@ class RTLModule:
     filepath: str | None = None
     testbench: str | None = None
     description: str = ""
+    architecture_id: str = ""
+    candidate: Any | None = None
 
 
 # ── Search Results ───────────────────────────────────────────────────
@@ -631,11 +635,45 @@ class DevicePhysicalEnvelope:
     min_ram_gb: float = 8.0
     min_storage_gb: float = 256.0
     interface_type: str = "USB-C"
-    target_model_name: str = "Qwen3-4B-INT4"
+    target_model_name: str = "Qwen-14B-INT4"
     target_model_params_b: float = 4.0
     weight_bits: int = 4
     min_tokens_per_sec: float = 15.0
     max_latency_ms: float = 200.0
+
+    @classmethod
+    def from_config(cls, config_path: str = "configs/target_device_envelope.yaml") -> DevicePhysicalEnvelope:
+        """Load physical envelope constraints from configuration file if available."""
+        if os.path.exists(config_path):
+            try:
+                import yaml
+                with open(config_path, "r", encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+                enc = cfg.get("device_envelope", {})
+                dim = enc.get("dimensions_mm", {})
+                pow_cfg = enc.get("power", {})
+                therm = enc.get("thermal", {})
+                mem = enc.get("memory", {})
+                perf = enc.get("performance", {})
+                workload = enc.get("target_workload", {})
+                return cls(
+                    target_name=enc.get("name", "Portable Independent AI Device"),
+                    enclosure_length_mm=float(dim.get("length", 100.0)),
+                    enclosure_width_mm=float(dim.get("width", 30.0)),
+                    enclosure_height_mm=float(dim.get("height", 12.0)),
+                    max_power_w=float(pow_cfg.get("max_total_w", 5.0)),
+                    max_junction_temp_c=float(therm.get("max_junction_temp_c", 85.0)),
+                    ambient_temp_c=float(therm.get("ambient_temp_c", 30.0)),
+                    thermal_resistance_c_per_w=float(therm.get("theta_ja_c_per_w", 10.0)),
+                    min_ram_gb=float(mem.get("system_ram_gb", 8.0)),
+                    min_storage_gb=float(mem.get("storage_gb", 256.0)),
+                    target_model_name=workload.get("target_model", "Qwen-14B-INT4"),
+                    target_model_params_b=float(workload.get("parameters_b", 14.0)),
+                    min_tokens_per_sec=float(perf.get("min_tokens_per_sec", 15.0)),
+                )
+            except Exception as e:
+                logger.warning(f"Failed to load envelope config from {config_path}: {e}")
+        return cls()
 
     @property
     def max_pcb_area_mm2(self) -> float:
@@ -756,7 +794,7 @@ class TargetSpecification:
     max_temperature_c: float = 85.0
     min_ram_gb: float = 8.0
     min_storage_gb: float = 256.0
-    target_model: str = "Qwen3-4B"
+    target_model: str = "Qwen-14B"
     target_model_quantization: str = "INT4"
     min_tokens_per_second: float = 15.0
     max_latency_ms: float = 200.0

@@ -32,6 +32,16 @@ class VerilatorTool:
         self.work_dir = work_dir
         os.makedirs(work_dir, exist_ok=True)
         self._has_binary = shutil.which(binary) is not None
+        self.tool_version = self._detect_version() if self._has_binary else "heuristic_fallback"
+
+    def _detect_version(self) -> str:
+        """Query native Verilator binary version."""
+        try:
+            import subprocess
+            out = subprocess.check_output([self.binary, "--version"], text=True, stderr=subprocess.STDOUT)
+            return out.strip().splitlines()[0]
+        except Exception:
+            return "verilator (version unknown)"
 
     def _parse_error_location(self, error_line: str) -> tuple[str, Optional[int]]:
         """Extract filename and line number from Verilator or linter output."""
@@ -163,6 +173,9 @@ class VerilatorTool:
                     return {
                         "stage": "verilator",
                         "status": "failed",
+                        "tool": "native_verilator",
+                        "tool_version": self.tool_version,
+                        "metric_type": "actual",
                         "error": first_err,
                         "file": file_name,
                         "line": line_num,
@@ -170,6 +183,9 @@ class VerilatorTool:
                 return {
                     "stage": "verilator",
                     "status": "passed",
+                    "tool": "native_verilator",
+                    "tool_version": self.tool_version,
+                    "metric_type": "actual",
                     "error": "",
                     "file": filename,
                     "line": None,
@@ -178,7 +194,11 @@ class VerilatorTool:
                 logger.warning(f"Native verilator failed to execute: {e}. Falling back to internal linter.")
 
         # Fallback to internal SystemVerilog syntax/lint validator
-        return self.validate_sv_syntax(code, filename=filename)
+        res = self.validate_sv_syntax(code, filename=filename)
+        res["tool"] = "internal_regex_linter"
+        res["metric_type"] = "heuristic"
+        res["tool_version"] = "internal_fallback"
+        return res
 
     async def lint_and_compile(self, file_path: str, top_module: str = "mac") -> dict[str, Any]:
         """Lint and compile SystemVerilog module."""

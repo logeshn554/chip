@@ -98,19 +98,22 @@ class CompactTechnicalContext:
         }
 
 
+from llm.interface import get_default_model
+
+
 class ScrapeGraphAdapter:
     """Adapter implementing targeted ScrapeGraphAI extraction for hardware design tasks."""
 
     def __init__(
         self,
-        ollama_model: str = "qwen3:4b",  # Aligned with main agent Qwen3-4B reasoning core
+        ollama_model: Optional[str] = None,  # Aligned with main agent Qwen-14B reasoning core
         max_page_bytes: int = 250_000,
         allowed_domains: list[str] | None = None,
         cache_dir: str = "./data/web_cache",
         timeout: float = 15.0,
         max_retries: int = 3,
     ):
-        self.ollama_model = ollama_model
+        self.ollama_model = get_default_model(ollama_model)
         self.max_page_bytes = max_page_bytes
         self.allowed_domains = allowed_domains or DEFAULT_ALLOWED_DOMAINS
         self.cache_dir = cache_dir

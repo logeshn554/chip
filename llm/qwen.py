@@ -16,7 +16,7 @@ from typing import Any, Optional
 import urllib.error
 import urllib.request
 
-from llm.interface import LLMInterface, LLMResponse, Message
+from llm.interface import LLMInterface, LLMResponse, Message, get_default_model
 
 logger = logging.getLogger(__name__)
 
@@ -26,14 +26,14 @@ class OllamaQwenClient(LLMInterface):
 
     def __init__(
         self,
-        model: str = "qwen3:4b",
+        model: Optional[str] = None,
         base_url: str = "http://localhost:11434",
         timeout: float = 180.0,
         temperature: float = 0.2,
         top_p: float = 0.9,
         mock_mode: bool = False,
     ):
-        self.model = model
+        self.model = get_default_model(model)
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.temperature = temperature
@@ -50,31 +50,24 @@ class OllamaQwenClient(LLMInterface):
         self._mock_responses[prompt_substring] = response
 
     def verify_model_installed(self) -> None:
-        """Check Ollama connectivity and verify that model is installed."""
+        """Verify model is installed in Ollama before proceeding."""
         if self._is_mock_enabled():
             return
 
-        url = f"{self.base_url}/api/tags"
+        tags_url = f"{self.base_url}/api/tags"
+        req = urllib.request.Request(tags_url)
         try:
-            req = urllib.request.Request(url, method="GET")
-            with urllib.request.urlopen(req, timeout=min(self.timeout, 10.0)) as resp:
-                resp_bytes = resp.read()
-                if not resp_bytes:
-                    raise RuntimeError("Ollama returned empty response for /api/tags")
-                data = json.loads(resp_bytes.decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            raise RuntimeError(
-                f"Ollama request failed: HTTP {e.code}. URL={url}, model={self.model}"
-            ) from e
+            with urllib.request.urlopen(req, timeout=10.0) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
         except urllib.error.URLError as e:
             raise RuntimeError(
-                f"Cannot connect to Ollama at {self.base_url}. Ensure Ollama is running."
-            ) from e
+                f"Ollama server is unreachable at {self.base_url}. "
+                f"Ensure Ollama is running (`ollama serve`). Error: {e}"
+            )
 
-        models = data.get("models", [])
         installed_names = []
-        for m in models:
-            if isinstance(m, dict):
+        if isinstance(data, dict) and "models" in data:
+            for m in data["models"]:
                 if "name" in m:
                     installed_names.append(m["name"])
                 if "model" in m:
@@ -90,7 +83,7 @@ class OllamaQwenClient(LLMInterface):
         )
 
         if not matched:
-            raise RuntimeError("Qwen3-4B is not installed in Ollama. Run: ollama pull qwen3:4b")
+            raise RuntimeError(f"Model {self.model} is not installed in Ollama. Run: ollama pull {self.model}")
 
     def count_tokens(self, text: str) -> int:
         """Heuristic token count: ~4 chars per token for English / SystemVerilog."""

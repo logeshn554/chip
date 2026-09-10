@@ -50,42 +50,67 @@ class RTLGenerator:
         spec: str,
         context_docs: list[Document] | None = None,
         name: str | None = None,
+        architecture_candidate: Any | None = None,
+        architecture_id: str | None = None,
     ) -> RTLModule:
-        """Generate a SystemVerilog module from a specification.
+        """Generate a SystemVerilog module from a specification and architecture candidate.
 
         Args:
             spec: Natural language specification
             context_docs: Relevant documents from memory
             name: Optional module name (inferred from spec if not given)
+            architecture_candidate: Optional HardwareArchitectureCandidate to bind RTL to
+            architecture_id: Identifier of the candidate architecture
 
         Returns:
-            RTLModule with generated code
+            RTLModule with generated code bound to candidate architecture
         """
-        logger.info(f"Generating module: {spec[:80]}...")
+        cand_id = architecture_id or (getattr(architecture_candidate, "architecture_id", "") if architecture_candidate else "")
+        logger.info(f"Generating module: {spec[:80]}... [Arch ID: {cand_id or 'none'}]")
 
-        # Build context from memory docs
-        context = ""
-        if context_docs:
-            context = "Reference information:\n" + "\n\n".join(
-                f"---\n{doc.content}" for doc in context_docs[:3]
+        # Build context from memory docs and candidate architecture parameters
+        context_parts = []
+        if architecture_candidate:
+            arch_summary = (
+                f"Candidate Architecture Specification [{cand_id}]:\n"
+                f"- Datapath: {getattr(architecture_candidate, 'datapath_structure', 'N/A')}\n"
+                f"- Pipeline Depth: {getattr(architecture_candidate, 'pipeline_depth', 'N/A')}\n"
+                f"- Parallelism: {getattr(architecture_candidate, 'parallelism', 'N/A')}\n"
+                f"- Arithmetic Strategy: {getattr(architecture_candidate, 'arithmetic_strategy', 'N/A')}\n"
+                f"- Buffering Strategy: {getattr(architecture_candidate, 'buffering_strategy', 'N/A')}\n"
+                f"- Interfaces: {getattr(architecture_candidate, 'interfaces', [])}\n"
+                f"- Memory Hierarchy: {getattr(architecture_candidate, 'memory_hierarchy', {})}\n"
+                f"- Rationale: {getattr(architecture_candidate, 'research_rationale', 'N/A')}\n"
             )
+            context_parts.append(arch_summary)
+
+        if context_docs:
+            context_parts.append("Reference information:\n" + "\n\n".join(
+                f"---\n{doc.content}" for doc in context_docs[:3]
+            ))
+
+        context = "\n\n".join(context_parts)
 
         # Build prompt
         system_prompt = self.prompts.get("system", {}).get("agent", "")
         generate_prompt = self.prompts.get("rtl", {}).get("generate_module", "")
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": generate_prompt.format(spec=spec, context=context),
-            },
-        ]
+        # If candidate already includes valid synthesizable RTL code, use it
+        existing_rtl = getattr(architecture_candidate, "rtl_implementation", "") if architecture_candidate else ""
+        if existing_rtl and len(existing_rtl.strip()) > 50:
+            code = existing_rtl
+        else:
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": generate_prompt.format(spec=spec, context=context),
+                },
+            ]
 
-        response = await self.qwen.generate(messages, temperature=0.3)
-
-        # Extract SystemVerilog code from response
-        code = self.qwen.extract_code(response.content, "systemverilog")
+            response = await self.qwen.generate(messages, temperature=0.3)
+            # Extract SystemVerilog code from response
+            code = self.qwen.extract_code(response.content, "systemverilog")
 
         # Parse module name from code if not provided
         if not name:
@@ -101,9 +126,11 @@ class RTLGenerator:
             code=code,
             filepath=filepath,
             description=spec,
+            architecture_id=cand_id,
+            candidate=architecture_candidate,
         )
 
-        logger.info(f"Generated module '{name}' → {filepath}")
+        logger.info(f"Generated module '{name}' bound to architecture '{cand_id}' → {filepath}")
         return module
 
     async def generate_testbench_code(self, module_code: str) -> str:

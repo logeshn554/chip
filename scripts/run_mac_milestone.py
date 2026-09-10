@@ -100,7 +100,8 @@ async def main():
     # 1. Load configuration
     config = load_agent_config()
     llm_cfg = config.get("llm", {})
-    model_name = llm_cfg.get("model_name", "qwen3:4b")
+    from llm.interface import get_default_model
+    model_name = get_default_model(llm_cfg.get("model_name"))
     base_url = llm_cfg.get("ollama", {}).get("base_url", "http://localhost:11434")
 
     print(f"LLM Provider: Ollama")

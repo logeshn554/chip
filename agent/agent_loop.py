@@ -75,23 +75,52 @@ class AgentLoop:
         self.max_retries = self.config.get("max_retries_per_step", 3)
         self.early_stop_reward = self.config.get("early_stop_reward", 0.95)
 
+    def _log_observability(self, event_type: str, data: dict[str, Any], experiment_id: str = "") -> None:
+        """Standardized structured observability logging across all agent runs (Issue 53)."""
+        record = {
+            "event": event_type,
+            "timestamp": time.time(),
+            "experiment_id": experiment_id,
+            "data": data,
+        }
+        logger.info(f"[OBSERVABILITY] {event_type} -> {json.dumps(record, default=str)}")
+
     # ── Main Entry Point ─────────────────────────────────────────────
 
-    async def run(self, task: str) -> Episode:
+    async def run(
+        self,
+        task: str,
+        experiment_id: str | None = None,
+        seed: int | None = None,
+    ) -> Episode:
         """Run the complete agent loop on a hardware design task.
 
         Args:
             task: Human-readable task description
                   (e.g., "Design a 4-bit ALU with add, subtract, AND, OR")
+            experiment_id: Optional immutable experiment ID
+            seed: Optional centralized random seed for reproducibility
 
         Returns:
             Episode containing the full trajectory
         """
-        console.print(Panel(f"[bold cyan]Task:[/] {task}", title="🧠 Hardware Agent"))
+        import random
+        import uuid
+        from evaluator.physical_feasibility import PhysicalFeasibilityEngine
+        from agent.schemas import FeasibilityLabel, TargetSpecification
+
+        # Issue 56: Centralized seeding
+        run_seed = seed if seed is not None else self.config.get("seed", 42)
+        random.seed(run_seed)
+
+        # Issue 54: Immutable experiment ID threading
+        exp_id = experiment_id or self.config.get("experiment_id") or f"exp_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+
+        console.print(Panel(f"[bold cyan]Task:[/] {task}\n[dim]Experiment ID: {exp_id} | Seed: {run_seed}[/]", title="🧠 Hardware Agent"))
 
         # Initialize state
         state = AgentState(task=task)
-        episode = Episode(task=task)
+        episode = Episode(task=task, experiment_id=exp_id, seed=run_seed)
         retries = 0
 
         # Step 1: Retrieve relevant memory context
@@ -101,6 +130,19 @@ class AgentLoop:
         console.print("[bold yellow]📋 Planning...[/]")
         state.plan = await self.planner.decompose(task, context)
         self._display_plan(state.plan)
+
+        # Step 2b: Execute targeted initial research contract if planned by LLM
+        if state.plan and getattr(state.plan, "needs_research", False) and getattr(state.plan, "search_queries", None):
+            console.print("[bold cyan]🔍 Executing targeted research plan...[/]")
+            for query in state.plan.search_queries[:2]:
+                research_action = AgentAction(
+                    action_type=ActionType.SEARCH_WEB,
+                    params={"query": query},
+                    thinking=f"Executing research contract query: {query}",
+                )
+                r_result = await self.router.execute(research_action)
+                if r_result.status == ActionStatus.SUCCESS and r_result.output:
+                    context = f"{context}\n\n[Research Evidence - {query}]\n{r_result.output[:1000]}"
 
         # Step 3: Execute the loop
         while state.iteration < self.max_iterations:
@@ -112,11 +154,56 @@ class AgentLoop:
 
             # 3b. Ask Qwen for the next action
             action = await self._get_next_action(state, iter_context)
-            state.last_action = action
-
-            # Check for completion
+            # Check for completion with strict verification contract gate
             if action.action_type == ActionType.COMPLETE:
-                console.print("[bold green]✓ Agent decided task is complete[/]")
+                has_rtl = bool(state.design_files and any(f.endswith((".sv", ".v")) for f in state.design_files))
+                has_sim = bool("functional" in state.verification_stages)
+                has_synth = bool("synthesis" in state.verification_stages)
+
+                if not (has_rtl and (has_sim or has_synth)) and not self.config.get("allow_unverified_completion", False):
+                    console.print("[bold red]❌ Completion gate rejected: design requires verified RTL and simulation/synthesis before completion.[/]")
+                    result = ActionResult(
+                        action=ActionType.COMPLETE,
+                        status=ActionStatus.FAILURE,
+                        output="Completion rejected: Verification contract requires: (1) generated RTL, (2) simulation or synthesis pass.",
+                        errors=["Verification contract gate not satisfied"],
+                    )
+                    state.last_result = result
+                    retries += 1
+                    continue
+
+                # Issue 29: Formal Verification Gate Check
+                if self.config.get("require_formal_verification", False) and "formal" not in state.verification_stages:
+                    console.print("[bold red]❌ Completion gate rejected: formal verification pass is required before completion.[/]")
+                    result = ActionResult(
+                        action=ActionType.COMPLETE,
+                        status=ActionStatus.FAILURE,
+                        output="Completion rejected: Verification contract requires formal verification pass.",
+                        errors=["Formal verification missing"],
+                    )
+                    state.last_result = result
+                    retries += 1
+                    continue
+
+                # Issue 41: Physical Feasibility Gate on Critical Path
+                if getattr(state, "active_candidate", None) is not None:
+                    phys_engine = PhysicalFeasibilityEngine(TargetSpecification())
+                    phys_report = phys_engine.evaluate_candidate(state.active_candidate)
+                    if phys_report.feasibility == FeasibilityLabel.INFEASIBLE_ESTIMATE:
+                        console.print(f"[bold red]❌ Physical feasibility gate failed: {', '.join(phys_report.violations)}[/]")
+                        result = ActionResult(
+                            action=ActionType.COMPLETE,
+                            status=ActionStatus.FAILURE,
+                            output=f"Physical envelope violated: {phys_report.recommendation}",
+                            errors=phys_report.violations,
+                        )
+                        state.last_result = result
+                        retries = self.max_retries  # Force architectural escalation
+                        continue
+                    else:
+                        console.print(f"[bold green]✓ Physical feasibility verified: {phys_report.feasibility.value}[/]")
+
+                console.print("[bold green]✓ Agent verified design and completed task[/]")
                 break
 
             # 3c. Execute the action
@@ -148,16 +235,19 @@ class AgentLoop:
             if should_evaluate and self.evaluator:
                 eval_result = await self._evaluate(state)
                 step_reward = eval_result.reward
+                improvement = max(0.0, eval_result.reward - state.current_design_reward)
                 state.current_design_reward = eval_result.reward
-                state.cumulative_reward += step_reward
-                state.episode_return += step_reward
+                state.cumulative_reward += improvement
+                state.episode_return += improvement
                 state.best_reward = max(state.best_reward, eval_result.reward)
 
                 # Record stage-specific score
-                if action.action_type == ActionType.SIMULATE:
+                if action.action_type in (ActionType.SIMULATE, ActionType.RUN_SIMULATION, ActionType.RUN_TESTS):
                     state.verification_stages["functional"] = eval_result.breakdown
-                elif action.action_type == ActionType.SYNTHESIZE:
+                elif action.action_type in (ActionType.SYNTHESIZE, ActionType.RUN_YOSYS):
                     state.verification_stages["synthesis"] = eval_result.breakdown
+                elif action.action_type == ActionType.FORMAL_VERIFY:
+                    state.verification_stages["formal"] = eval_result.breakdown
 
                 self._display_evaluation(eval_result)
 
@@ -185,19 +275,51 @@ class AgentLoop:
                 step.status = "completed" if result.status == ActionStatus.SUCCESS else "failed"
                 step.result = result
 
-            # 3j. Check early stopping based on best design quality achieved
-            if state.best_reward >= self.early_stop_reward:
+            # 3j. Check early stopping based on normalized design quality achieved
+            normalized_best = state.best_reward / 8.0 if state.best_reward > 1.0 else state.best_reward
+            has_valid_rtl = bool(state.design_files and any(f.endswith((".sv", ".v")) for f in state.design_files))
+            if normalized_best >= self.early_stop_reward and has_valid_rtl:
                 console.print(
-                    f"[bold green]🎯 Early stop — best reward {state.best_reward:.3f} "
-                    f">= {self.early_stop_reward}[/]"
+                    f"[bold green]🎯 Early stop — normalized best reward {normalized_best:.3f} "
+                    f">= {self.early_stop_reward} with valid RTL[/]"
                 )
                 break
 
-            # 3k. Check retry limit
+            # 3k. Check retry limit: separate RTL repair from architecture redesign
             if retries >= self.max_retries:
-                console.print("[bold red]💥 Max retries reached, replanning...[/]")
+                console.print("[bold red]💥 Max retries reached: escalating failure to architectural mutation...[/]")
                 error_context = result.output if result else "Unknown error"
-                state.plan = await self.planner.replan(state.plan, error_context)
+
+                from agent.architecture_search import ArchitectureSearchEngine
+                from agent.schemas import TargetSpecification, HardwareArchitectureCandidate
+                arch_engine = ArchitectureSearchEngine()
+                failed_cand = getattr(state, "active_candidate", None) or HardwareArchitectureCandidate(
+                    architecture_id=f"cand_iter_{state.iteration}",
+                    task_id=state.task[:20].replace(" ", "_"),
+                    parallelism=2,
+                )
+                failed_reasons = []
+                err_lower = error_context.lower()
+                if "timing" in err_lower:
+                    failed_reasons.append("timing")
+                elif "power" in err_lower or "thermal" in err_lower:
+                    failed_reasons.append("power")
+                elif "area" in err_lower or "size" in err_lower:
+                    failed_reasons.append("area")
+                else:
+                    failed_reasons.append("synthesis_syntax_exhaustion")
+
+                mutated = arch_engine.evolve_after_rejection(failed_cand, failed_reasons, TargetSpecification())
+                arch_engine.genealogy.register_candidate(failed_cand)
+                arch_engine.genealogy.register_candidate(
+                    mutated,
+                    parent_id=failed_cand.architecture_id,
+                    mutation_type=mutated.mutation_type,
+                    rationale=f"Mutated after failure: {error_context[:100]}",
+                )
+                state.active_candidate = mutated
+                console.print(f"[bold magenta]🧬 Architecture evolved to: {mutated.architecture_id} via {mutated.mutation_type}[/]")
+                state.plan = await self.planner.replan(state.plan, f"Architecture mutated ({mutated.mutation_type}): {error_context[:100]}")
                 retries = 0
 
             # 3l. Add to history

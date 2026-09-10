@@ -26,13 +26,13 @@ import urllib.request
 from typing import Any, Optional
 
 from agent.schemas import QwenResponse
-from llm.interface import LLMInterface, LLMResponse, Message
+from llm.interface import LLMInterface, LLMResponse, Message, get_default_model
 
 logger = logging.getLogger(__name__)
 
 
 class QwenClient(LLMInterface):
-    """Unified interface to Qwen3-4B for hardware reasoning and generation."""
+    """Unified interface to Qwen LLM for hardware reasoning and generation."""
 
     def __init__(self, config: dict[str, Any] | None = None, **kwargs: Any):
         config = config or {}
@@ -41,7 +41,7 @@ class QwenClient(LLMInterface):
         self.config = merged
 
         self.backend = merged.get("backend", "ollama")
-        self.model_name = merged.get("model_name", merged.get("model", "qwen3:4b"))
+        self.model_name = get_default_model(merged.get("model_name", merged.get("model")))
         self.max_new_tokens = int(merged.get("max_new_tokens", merged.get("max_tokens", 8192)))
         self.temperature = float(merged.get("temperature", 0.7))
         self.top_p = float(merged.get("top_p", 0.9))
@@ -203,7 +203,7 @@ class QwenClient(LLMInterface):
         )
 
         if not matched:
-            raise RuntimeError("Qwen3-4B is not installed in Ollama. Run: ollama pull qwen3:4b")
+            raise RuntimeError(f"Model {self.model_name} is not installed in Ollama. Run: ollama pull {self.model_name}")
 
     async def complete(self, messages: list[Message], **kwargs: Any) -> LLMResponse:
         """Implementation of LLMInterface.complete."""

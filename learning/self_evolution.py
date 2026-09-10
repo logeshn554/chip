@@ -44,6 +44,7 @@ from learning.environment import HardwareDesignEnv
 from learning.grpo import HardwareRewardEvaluator, compute_group_advantages
 from memory.experience_store import ExperienceStore, Experience, categorize_error
 from scraping.component_search import ComponentSearchEngine
+from llm.interface import get_default_model
 
 logger = logging.getLogger(__name__)
 
@@ -463,7 +464,7 @@ class SelfEvolutionController:
             final_reward=env.current_design_quality,
             success=success,
             experiment_id=f"exp_{self.generation_count:03d}",
-            model_id="qwen3:4b",
+            model_id=get_default_model(),
             adapter_version=self.current_adapter,
             task_id=task.id,
             seed=42,
@@ -549,6 +550,11 @@ class SelfEvolutionController:
         promoted = False
         decision_reason = ""
 
+        # Issue 48: Unified centralized promotion contract
+        checkpoints_root = os.path.join(self.experiments_root, "checkpoints")
+        os.makedirs(checkpoints_root, exist_ok=True)
+        active_model_file = os.path.join(checkpoints_root, "active_model.json")
+
         if pass_rate >= self.promotion_threshold and (pass_rate > self.best_held_out_score or (pass_rate == self.best_held_out_score and mean_rew >= self.best_mean_reward)):
             promoted = True
             self.best_held_out_score = pass_rate
@@ -556,9 +562,47 @@ class SelfEvolutionController:
             self.current_adapter = candidate_adapter
             decision_reason = f"Promoted: Held-out pass rate ({pass_rate:.3f}) met promotion threshold ({self.promotion_threshold:.2f}) and improved performance (mean reward {mean_rew:.3f})."
             logger.info(f"POLICY PROMOTION: {candidate_adapter} promoted! {decision_reason}")
+
+            # Issue 49: Write concrete immutable model artifact directory on promotion
+            cand_dir = os.path.join(checkpoints_root, candidate_adapter)
+            os.makedirs(cand_dir, exist_ok=True)
+            with open(os.path.join(cand_dir, "adapter_config.json"), "w", encoding="utf-8") as f:
+                json.dump({
+                    "adapter_name": candidate_adapter,
+                    "base_model": get_default_model(),
+                    "generation": self.generation_count,
+                    "held_out_pass_rate": pass_rate,
+                    "mean_reward": mean_rew,
+                    "promoted_at": datetime.now(timezone.utc).isoformat(),
+                    "r": 16,
+                    "lora_alpha": 32,
+                    "target_modules": ["q_proj", "v_proj", "k_proj", "o_proj"],
+                }, f, indent=2)
+
+            with open(active_model_file, "w", encoding="utf-8") as f:
+                json.dump({
+                    "active_adapter": candidate_adapter,
+                    "adapter_path": cand_dir,
+                    "base_model": get_default_model(),
+                    "status": "promoted",
+                    "generation": self.generation_count,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }, f, indent=2)
         else:
             decision_reason = f"Rollback: New candidate did not outperform best held-out score ({pass_rate:.3f} <= {self.best_held_out_score:.3f}). Reverted to {prev_adapter}."
             logger.info(f"POLICY ROLLBACK: {decision_reason}")
+
+            # Issue 49: Explicit filesystem artifact rollback
+            with open(active_model_file, "w", encoding="utf-8") as f:
+                json.dump({
+                    "active_adapter": prev_adapter,
+                    "adapter_path": os.path.join(checkpoints_root, prev_adapter) if prev_adapter != "base_qwen_14b" else "base",
+                    "base_model": get_default_model(),
+                    "status": "rolled_back",
+                    "rejected_candidate": candidate_adapter,
+                    "generation": self.generation_count,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }, f, indent=2)
 
         # 6. Automatic Curriculum Level Adjustment
         old_level = self.current_level
@@ -598,7 +642,7 @@ class SelfEvolutionController:
         # manifest.json
         manifest = {
             "experiment_id": exp_id,
-            "model_id": "qwen3:4b",
+            "model_id": get_default_model(),
             "active_adapter": self.current_adapter,
             "previous_adapter": record.previous_adapter,
             "curriculum_level": record.level,

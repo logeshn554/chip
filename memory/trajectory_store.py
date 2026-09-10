@@ -21,6 +21,8 @@ import logging
 import os
 from typing import Any, Optional
 
+from llm.interface import get_default_model
+
 logger = logging.getLogger(__name__)
 
 
@@ -52,7 +54,7 @@ class TrajectoryRecord:
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     metadata: dict[str, Any] = field(default_factory=dict)
     provider: str = "ollama"
-    model: str = "qwen3:4b"
+    model: str = field(default_factory=get_default_model)
     fallback_used: bool = False
     rtl_source: str = "qwen"
 
@@ -76,61 +78,9 @@ class TrajectoryRecord:
             "metadata": self.metadata,
         }
 
+from memory.trajectory import TrajectoryStore as CanonicalTrajectoryStore
 
-class TrajectoryStore:
-    """File-backed JSONL trajectory store."""
 
-    def __init__(self, log_dir: str = "./trajectories"):
-        self.log_dir = log_dir
-        os.makedirs(log_dir, exist_ok=True)
-        self.log_file = os.path.join(log_dir, "trajectories.jsonl")
-
-    def save_trajectory(
-        self,
-        task: str,
-        steps: list[dict[str, Any] | TrajectoryStep],
-        reward: float,
-        metadata: Optional[dict[str, Any]] = None,
-    ) -> str:
-        """Persist a finished episode trajectory to JSONL."""
-        cleaned_steps = []
-        for s in steps:
-            if isinstance(s, TrajectoryStep):
-                cleaned_steps.append(s.to_clean_dict())
-            elif isinstance(s, dict):
-                cleaned_steps.append(s)
-
-        meta = metadata or {}
-        record = TrajectoryRecord(
-            task=task,
-            steps=cleaned_steps,
-            reward=reward,
-            metadata=meta,
-            provider=meta.get("provider", "ollama"),
-            model=meta.get("model", "qwen3:4b"),
-            fallback_used=meta.get("fallback_used", False),
-            rtl_source=meta.get("rtl_source", "qwen"),
-        )
-
-        with open(self.log_file, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record.to_standard_dict()) + "\n")
-
-        logger.info(f"Trajectory recorded: {record.trajectory_id} (Reward: {reward}, Steps: {len(cleaned_steps)})")
-        return record.trajectory_id
-
-    def list_trajectories(self, min_reward: float = 0.0) -> list[dict[str, Any]]:
-        """Read and return trajectories, optionally filtered by reward."""
-        if not os.path.exists(self.log_file):
-            return []
-
-        results = []
-        with open(self.log_file, "r", encoding="utf-8") as f:
-            for line in f:
-                if line.strip():
-                    try:
-                        item = json.loads(line)
-                        if item.get("reward", 0.0) >= min_reward:
-                            results.append(item)
-                    except Exception:
-                        continue
-        return results
+class TrajectoryStore(CanonicalTrajectoryStore):
+    """File-backed JSONL trajectory store aliased to the canonical TrajectoryStore."""
+    pass

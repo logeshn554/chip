@@ -521,11 +521,14 @@ class QwenHardwareDesignPolicy:
                 import yaml
                 with open("configs/agent.yaml", "r", encoding="utf-8") as f:
                     cfg = yaml.safe_load(f)
-                self.model = str(cfg.get("llm", {}).get("model_name", "qwen3:4b"))
+                from llm.interface import get_default_model
+                self.model = get_default_model(str(cfg.get("llm", {}).get("model_name", "qwen2.5:14b")))
             except Exception:
-                self.model = "qwen3:4b"
+                from llm.interface import get_default_model
+                self.model = get_default_model()
         else:
-            self.model = model
+            from llm.interface import get_default_model
+            self.model = get_default_model(model)
 
     def select_action(self, obs: dict[str, Any]) -> dict[str, Any]:
         """Heuristic / LLM action selection based on current environment state."""

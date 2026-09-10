@@ -33,6 +33,16 @@ class YosysTool:
         self.work_dir = work_dir
         os.makedirs(work_dir, exist_ok=True)
         self._has_binary = shutil.which(binary) is not None
+        self.tool_version = self._detect_version() if self._has_binary else "heuristic_fallback"
+
+    def _detect_version(self) -> str:
+        """Query native Yosys binary version."""
+        try:
+            import subprocess
+            out = subprocess.check_output([self.binary, "-V"], text=True, stderr=subprocess.STDOUT)
+            return out.strip().splitlines()[0]
+        except Exception:
+            return "Yosys (version unknown)"
 
     def _heuristic_lint_check(self, code: str, top_module: str = "mac") -> dict[str, Any]:
         """Heuristic-only lint check using regex pattern matching.
@@ -163,6 +173,7 @@ class YosysTool:
                     f"hierarchy -check -top {top_module}\n"
                     f"proc; opt; fsm; opt; techmap; opt\n"
                     f"stat\n"
+                    f"ltp\n"
                 )
             try:
                 proc = await asyncio.create_subprocess_exec(
@@ -177,27 +188,34 @@ class YosysTool:
                 if proc.returncode == 0:
                     cells_match = re.search(r"Number of cells:\s+(\d+)", output)
                     wires_match = re.search(r"Number of wires:\s+(\d+)", output)
-                    cells = int(cells_match.group(1)) if cells_match else 165
+                    cells = int(cells_match.group(1)) if cells_match else None
                     wires = int(wires_match.group(1)) if wires_match else 0
 
                     # Parse DFF cells
                     dff_matches = re.findall(r"\b\$_DFF_\w+\s+(\d+)", output)
-                    dffs = sum(int(c) for c in dff_matches) if dff_matches else (33 if "mac" in top_module.lower() else 0)
+                    dffs = sum(int(c) for c in dff_matches) if dff_matches else 0
 
-                    area = round(cells * 3.14, 2)
+                    # Parse longest topological path for timing analysis
+                    ltp_match = re.search(r"Longest topological path in \S+ \(length=(\d+)\)", output)
+                    logic_levels = int(ltp_match.group(1)) if ltp_match else None
+                    critical_path_ns = round(logic_levels * 0.15, 3) if logic_levels is not None else None
 
                     return {
                         "stage": "yosys",
                         "status": "passed",
+                        "tool": "yosys",
+                        "tool_version": self.tool_version,
                         "metric_type": "actual",
                         "top_module": top_module,
                         "cells": cells,
                         "dffs": dffs,
-                        "logic_cells": max(0, cells - dffs),
+                        "logic_cells": max(0, cells - dffs) if cells is not None else None,
                         "wires": wires,
-                        "estimated_area": area,
-                        "critical_path_ns": None,
-                        "power_estimate_uw": None,
+                        "logic_levels": logic_levels,
+                        "critical_path_ns": critical_path_ns,
+                        "area_cells": cells,
+                        "estimated_area": round(cells * 3.14, 2) if cells is not None else None,
+                        "power_estimate_uw": None,  # Grounded rule: no fake power numbers
                         "error": "",
                         "raw_log": output,
                     }

@@ -39,8 +39,8 @@ target_device:
 
   # AI Workload & Performance Target
   workload:
-    target_model: "Qwen3-4B-INT4"
-    parameters_billion: 4.0
+    target_model: "Qwen-14B-INT4"
+    parameters_billion: 14.0
     weight_quantization_bits: 4
     min_tokens_per_sec: 15.0     # Target interactive decoding speed
     max_first_token_latency_ms: 200.0

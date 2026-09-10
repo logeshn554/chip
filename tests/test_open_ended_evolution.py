@@ -48,7 +48,7 @@ class TestTargetSpecification:
         assert spec.min_ram_gb == 8.0
         assert spec.min_storage_gb == 256.0
         assert spec.min_tokens_per_second == 15.0
-        assert spec.target_model == "Qwen3-4B"
+        assert spec.target_model in ("Qwen-14B", "Qwen3-14B")
         assert spec.process_node == "28nm"
         assert "USB-C" in spec.host_interfaces
 

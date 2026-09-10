@@ -30,6 +30,18 @@ class FormalVerificationTool:
         self.work_dir = work_dir
         os.makedirs(work_dir, exist_ok=True)
         self._has_binary = shutil.which(sby_binary) is not None
+        self.tool_version = self._detect_version()
+
+    def _detect_version(self) -> str:
+        """Detect SymbiYosys binary version."""
+        if not self._has_binary:
+            return "sby (not installed)"
+        try:
+            import subprocess
+            out = subprocess.check_output([self.sby_binary, "--version"], text=True, stderr=subprocess.STDOUT)
+            return out.strip().splitlines()[0]
+        except Exception:
+            return "sby (version unknown)"
 
     @property
     def is_available(self) -> bool:
@@ -174,6 +186,7 @@ depth {depth}
                 "stage": "formal",
                 "available": False,
                 "engine": "sby",
+                "tool_version": self.tool_version,
                 "properties_checked": formal_meta["num_assertions"],
                 "counterexample": None,
                 "output": (
@@ -214,6 +227,7 @@ depth {depth}
                     "stage": "formal",
                     "available": True,
                     "engine": "sby",
+                    "tool_version": self.tool_version,
                     "properties_checked": max(1, formal_meta["num_assertions"]),
                     "counterexample": None,
                     "output": output,
@@ -230,6 +244,7 @@ depth {depth}
                     "stage": "formal",
                     "available": True,
                     "engine": "sby",
+                    "tool_version": self.tool_version,
                     "properties_checked": max(1, formal_meta["num_assertions"]),
                     "counterexample": counterexample_info,
                     "output": output,
@@ -242,6 +257,7 @@ depth {depth}
                     "stage": "formal",
                     "available": True,
                     "engine": "sby",
+                    "tool_version": self.tool_version,
                     "properties_checked": formal_meta["num_assertions"],
                     "counterexample": None,
                     "output": output,

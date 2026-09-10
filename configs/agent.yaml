@@ -6,7 +6,7 @@
 llm:
   # "ollama" for local REST inference, "transformers" for local HF, "vllm" for OpenAI-compatible API
   backend: "ollama"
-  model_name: "qwen3:4b"
+  model_name: "qwen2.5:14b"
   device_map: "auto"
   torch_dtype: "auto"
   max_new_tokens: 8192

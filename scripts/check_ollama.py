@@ -8,13 +8,13 @@ Verifies:
 3. A real /api/generate generation request succeeds
 """
 
-import json
+import os
 import sys
 import urllib.error
 import urllib.request
 
-OLLAMA_URL = "http://localhost:11434"
-MODEL_NAME = "qwen3:4b"
+OLLAMA_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+MODEL_NAME = os.environ.get("LLM_MODEL", "qwen2.5:14b")
 
 
 def check_ollama():

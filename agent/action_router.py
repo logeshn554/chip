@@ -67,6 +67,33 @@ def is_path_safe_for_write(path: str, base_dir: str = ".") -> bool:
     return is_allowed
 
 
+def is_path_safe_for_read(path: str, base_dir: str = ".") -> bool:
+    """Check whether a target file path is safe for reading."""
+    normalized = os.path.normpath(path).replace("\\", "/")
+    if ".." in normalized.split("/"):
+        return False
+    if os.path.isabs(path):
+        workspace_abs = os.path.abspath(base_dir).replace("\\", "/")
+        norm_abs = os.path.abspath(path).replace("\\", "/")
+        if not norm_abs.startswith(workspace_abs):
+            return False
+    if normalized == ".git" or normalized.startswith(".git/"):
+        return False
+    return True
+
+
+def safe_write_file(path: str, content: str, base_dir: str = ".") -> None:
+    """Central authoritative sandbox write function.
+
+    Guarantees no component or handler performs untracked/unsafe filesystem mutations.
+    """
+    if not is_path_safe_for_write(path, base_dir=base_dir):
+        raise PermissionError(f"Security sandbox violation: write to '{path}' is forbidden.")
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+
 class ActionRouter:
     """Routes agent actions to the appropriate tool handlers.
 
@@ -170,17 +197,33 @@ class ActionRouter:
                 output=summary,
             )
 
-        # 3. Security check: validate paths in parameters
-        for key in ["filename", "file", "file_path", "target_file", "output_file"]:
-            if key in action.params:
-                val = str(action.params[key])
-                if not is_path_safe_for_write(val):
-                    return ActionResult(
-                        action=action.action_type,
-                        status=ActionStatus.ERROR,
-                        output=f"Security violation: Writing or accessing protected path '{val}' is forbidden.",
-                        errors=[f"Protected path violation: {val}"],
-                    )
+        # 3. Comprehensive security check: validate all path-bearing parameters
+        path_pattern = re.compile(r"(path|file|dir|source|testbench|netlist)", re.IGNORECASE)
+        is_read_action = action.action_type in (ActionType.READ_SOURCE, ActionType.RETRIEVE_MEMORY)
+
+        for key, val in action.params.items():
+            if path_pattern.search(key):
+                candidates_to_check = val if isinstance(val, list) else [val]
+                for item in candidates_to_check:
+                    if not isinstance(item, str) or not item.strip():
+                        continue
+                    item_str = item.strip()
+                    if is_read_action:
+                        if not is_path_safe_for_read(item_str):
+                            return ActionResult(
+                                action=action.action_type,
+                                status=ActionStatus.ERROR,
+                                output=f"Security violation: Reading from protected/unapproved path '{item_str}' is forbidden.",
+                                errors=[f"Protected path violation: {item_str}"],
+                            )
+                    else:
+                        if not is_path_safe_for_write(item_str):
+                            return ActionResult(
+                                action=action.action_type,
+                                status=ActionStatus.ERROR,
+                                output=f"Security violation: Writing to protected path '{item_str}' is forbidden.",
+                                errors=[f"Protected path violation: {item_str}"],
+                            )
 
         # 4. Lookup registered handler (with alias resolution)
         handler = self._handlers.get(action.action_type)
@@ -316,30 +359,73 @@ def build_router(
     async def handle_search_web(params: dict) -> ActionResult:
         query = params.get("query", "")
         url = params.get("url")
+        queries = params.get("queries", [query] if query else [])
+
+        target_urls = [url] if url else []
+        if not target_urls and web_searcher is not None and query:
+            try:
+                search_results = await web_searcher.search(query, max_results=3)
+                target_urls = [r.url for r in search_results if getattr(r, "url", None)]
+            except Exception as e:
+                logger.warning(f"WebSearcher query '{query}' failed: {e}")
+
+        if not target_urls:
+            if not query:
+                return ActionResult(
+                    action=ActionType.SEARCH_WEB,
+                    status=ActionStatus.FAILURE,
+                    output="SEARCH_WEB requires either a 'query' or a 'url' parameter.",
+                    errors=["Missing query and url"],
+                )
+            # If web search returned no URLs, report cleanly without faking a hardcoded page
+            return ActionResult(
+                action=ActionType.SEARCH_WEB,
+                status=ActionStatus.SUCCESS,
+                output=f"Web search for '{query}' returned no external URLs. Using offline agent memory.",
+                metrics={"query": query, "source_url": None, "token_count": 0},
+            )
 
         from scraping.scrapegraph_adapter import ScrapeGraphAdapter
         adapter = ScrapeGraphAdapter()
-        target_url = url or "https://en.wikipedia.org/wiki/Multiply%E2%80%93accumulate_operation"
+        extracted_contexts = []
+        total_tokens = 0
 
-        ctx = await adapter.extract_compact_context(url=target_url, focused_query=query)
-        output = ctx.to_prompt_text()
-
-        # Ingest into memory if available
-        if memory_system is not None:
+        # Query top diverse sources
+        for t_url in target_urls[:3]:
             try:
-                if hasattr(memory_system, "knowledge") and hasattr(memory_system.knowledge, "ingest"):
-                    memory_system.knowledge.ingest(
-                        ctx.extracted_summary,
-                        metadata={"source": ctx.source_url, "title": ctx.title, "query": query},
-                    )
+                ctx = await adapter.extract_compact_context(url=t_url, focused_query=query)
+                extracted_contexts.append(ctx)
+                total_tokens += ctx.token_count
+
+                # Ingest into memory if available
+                if memory_system is not None:
+                    try:
+                        if hasattr(memory_system, "knowledge") and hasattr(memory_system.knowledge, "ingest"):
+                            memory_system.knowledge.ingest(
+                                ctx.extracted_summary,
+                                metadata={"source": ctx.source_url, "title": ctx.title, "query": query},
+                            )
+                    except Exception as e:
+                        logger.debug(f"Knowledge ingestion skipped: {e}")
             except Exception as e:
-                logger.debug(f"Knowledge ingestion skipped: {e}")
+                logger.warning(f"Extraction failed for {t_url}: {e}")
+
+        if not extracted_contexts:
+            return ActionResult(
+                action=ActionType.SEARCH_WEB,
+                status=ActionStatus.FAILURE,
+                output=f"Failed to extract content from retrieved URLs: {target_urls[:3]}",
+                errors=["Extraction failure"],
+            )
+
+        combined_output = "\n\n---\n\n".join(c.to_prompt_text() for c in extracted_contexts)
+        primary_source = extracted_contexts[0].source_url
 
         return ActionResult(
             action=ActionType.SEARCH_WEB,
             status=ActionStatus.SUCCESS,
-            output=output,
-            metrics={"source_url": ctx.source_url, "token_count": ctx.token_count},
+            output=combined_output,
+            metrics={"source_url": primary_source, "source_urls": [c.source_url for c in extracted_contexts], "token_count": total_tokens},
         )
 
     router.register(ActionType.SEARCH_WEB, handle_search_web)
@@ -375,6 +461,14 @@ def build_router(
                 errors=["Parameter 'file' is required"],
             )
 
+        if not is_path_safe_for_read(file_path):
+            return ActionResult(
+                action=ActionType.READ_SOURCE,
+                status=ActionStatus.FAILURE,
+                output=f"Security violation: access to '{file_path}' is forbidden by read policy.",
+                errors=["Read policy violation"],
+            )
+
         if not os.path.exists(file_path):
             return ActionResult(
                 action=ActionType.READ_SOURCE,
@@ -401,9 +495,25 @@ def build_router(
         filename = params.get("filename", params.get("file", "generated.sv"))
         code = params.get("code", "")
         spec = params.get("spec", params.get("description", ""))
+        arch_id = params.get("architecture_id", params.get("arch_id", ""))
+
+        # Resolve architecture candidate from search engine if available
+        candidate = None
+        if arch_id and hasattr(search_engine, "genealogy") and arch_id in search_engine.genealogy.candidates:
+            candidate = search_engine.genealogy.candidates[arch_id]
+        elif hasattr(search_engine, "genealogy") and search_engine.genealogy.candidates:
+            # Bind to most recent candidate if unspecified
+            candidate = list(search_engine.genealogy.candidates.values())[-1]
+            arch_id = candidate.architecture_id
 
         if not code and rtl_generator is not None:
-            module = await rtl_generator.generate_module(spec, params.get("context", []))
+            module = await rtl_generator.generate_module(
+                spec=spec,
+                context_docs=params.get("context", []),
+                name=os.path.splitext(os.path.basename(filename))[0],
+                architecture_candidate=candidate,
+                architecture_id=arch_id,
+            )
             code = module.code
             filename = module.filepath or filename
 
@@ -421,17 +531,49 @@ def build_router(
 
         # Determine safe destination directory
         dest_dir = "./rtl/generated"
-        os.makedirs(dest_dir, exist_ok=True)
         file_path = os.path.join(dest_dir, os.path.basename(filename))
 
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(code)
+        try:
+            safe_write_file(file_path, code)
+        except Exception as e:
+            return ActionResult(
+                action=ActionType.GENERATE_RTL,
+                status=ActionStatus.FAILURE,
+                output=f"Sandbox rejected write: {e}",
+                errors=[str(e)],
+            )
+
+        artifacts = {"rtl": file_path}
+        if arch_id:
+            artifacts["architecture_id"] = arch_id
+            if candidate:
+                candidate.rtl_implementation = code
+
+        # Immediate verification plan coupling: auto-generate testbench template for generated module
+        tb_path = None
+        if rtl_generator is not None and not params.get("skip_tb", False):
+            try:
+                tb_code = await rtl_generator.generate_testbench_code(code)
+                if tb_code:
+                    tb_filename = f"test_{os.path.splitext(os.path.basename(filename))[0]}.py"
+                    tb_path = os.path.join("./rtl/generated/testbenches", tb_filename)
+                    safe_write_file(tb_path, tb_code)
+                    artifacts["testbench"] = tb_path
+            except Exception as e:
+                logger.debug(f"Automatic testbench pairing deferred: {e}")
+
+        msg = f"RTL written to {file_path} ({len(code.splitlines())} lines)"
+        if arch_id:
+            msg += f" bound to architecture [{arch_id}]"
+        if tb_path:
+            msg += f" with verification testbench paired at {tb_path}"
 
         return ActionResult(
             action=ActionType.GENERATE_RTL,
             status=ActionStatus.SUCCESS,
-            output=f"RTL written to {file_path} ({len(code.splitlines())} lines)",
-            artifacts={"rtl": file_path},
+            output=msg,
+            artifacts=artifacts,
+            metrics={"lines": len(code.splitlines()), "architecture_id": arch_id},
         )
 
     router.register(ActionType.GENERATE_RTL, handle_generate_rtl)
@@ -448,12 +590,18 @@ def build_router(
         else:
             tb_code = params.get("code", "")
 
-        dest_dir = "./tests/generated"
-        os.makedirs(dest_dir, exist_ok=True)
+        dest_dir = "./rtl/generated/testbenches"
         file_path = os.path.join(dest_dir, os.path.basename(filename))
 
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(tb_code)
+        try:
+            safe_write_file(file_path, tb_code)
+        except Exception as e:
+            return ActionResult(
+                action=ActionType.GENERATE_TESTBENCH,
+                status=ActionStatus.FAILURE,
+                output=f"Sandbox rejected testbench write: {e}",
+                errors=[str(e)],
+            )
 
         return ActionResult(
             action=ActionType.GENERATE_TESTBENCH,

@@ -28,7 +28,7 @@ from agent.state import AgentState
 from agent.schemas import Episode
 from agent.prompts import SYSTEM_PROMPT, ERROR_ANALYSIS_PROMPT
 from agent.planner import HardwarePlanner
-from llm.interface import LLMInterface
+from llm.interface import LLMInterface, get_default_model
 from llm.qwen import OllamaQwenClient
 from memory.knowledge_store import KnowledgeStore
 from memory.experience_store import ExperienceStore, Experience
@@ -81,13 +81,16 @@ class HardwareAgent:
         self.arch_engine = ArchitectureSearchEngine()
         self.reward_engine = RewardEngine()
 
-    def _log_observability(self, event_type: str, data: dict[str, Any]) -> None:
-        """Structured observability logging required by specification."""
+    def _log_observability(self, event_type: str, data: dict[str, Any], experiment_id: str = "") -> None:
+        """Standardized structured observability logging matching canonical AgentLoop (Issue 53)."""
+        import time
         record = {
             "event": event_type,
+            "timestamp": time.time(),
+            "experiment_id": experiment_id,
             "data": data,
         }
-        logger.info(f"[OBSERVABILITY] {event_type} -> {json.dumps(data, default=str)}")
+        logger.info(f"[OBSERVABILITY] {event_type} -> {json.dumps(record, default=str)}")
 
     async def _execute_action(self, action: str, params: dict[str, Any], state: AgentState) -> dict[str, Any]:
         """Strict tool interface: dispatches only validated actions."""
@@ -338,7 +341,7 @@ class HardwareAgent:
             "func": func_ok,
             "synth": synth_ok,
             "provider": getattr(self.llm, "backend", "ollama"),
-            "model": getattr(self.llm, "model", getattr(self.llm, "model_name", "qwen3:4b")),
+            "model": getattr(self.llm, "model", getattr(self.llm, "model_name", get_default_model())),
             "fallback_used": bool(getattr(self.llm, "mock_mode", False) or os.environ.get("LLM_PROVIDER") == "mock"),
             "rtl_source": "qwen",
         }

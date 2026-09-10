@@ -596,6 +596,31 @@ class ParetoFrontier:
 
         return max(pool, key=_target_score)
 
+    def select_measured_winner(
+        self, target_spec: TargetSpecification
+    ) -> Optional[HardwareArchitectureCandidate]:
+        """Strict winner selection: Requires actual EDA synthesis MEASUREMENT.
+
+        Refuses to declare an unmeasured analytical estimate as winning hardware.
+        """
+        measured_pool = []
+        for cand in self.frontier:
+            objs = self.extract_metric_objects(cand)
+            # Area/cells must be measured from real synthesis netlist
+            area_obj = objs.get("area")
+            has_measured_area = bool(area_obj and area_obj.status == InformationClass.MEASUREMENT)
+            has_synth_metrics = bool(
+                cand.actual_synthesis_metrics and cand.actual_synthesis_metrics.get("cells", 0) > 0
+            )
+            if has_measured_area or has_synth_metrics:
+                measured_pool.append(cand)
+
+        if not measured_pool:
+            logger.warning("No candidate has empirically verified EDA measurements. Measured winner selection deferred.")
+            return None
+
+        return max(measured_pool, key=lambda c: getattr(c, "reward", 0.0))
+
 
 # ── Custom Chip Generator & Decomposition ──────────────────────────────
 
@@ -1261,6 +1286,14 @@ class ArchitectureSearchEngine:
         # 4. Throughput failure -> Deepen pipeline or expand parallelism
         if any("throughput" in fc.lower() or "token" in fc.lower() or "latency" in fc.lower() for fc in failed_constraints):
             return self.apply_operation(failed_candidate, SearchOperation.CHANGE_PIPELINE, target_spec)
+
+        # 5. Timing / Critical Path failure -> Deeper pipeline or narrower datapath
+        if any("timing" in fc.lower() or "frequency" in fc.lower() or "critical_path" in fc.lower() for fc in failed_constraints):
+            return self.apply_operation(failed_candidate, SearchOperation.CHANGE_PIPELINE, target_spec, extra_params={"focus": "deeper_pipeline_timing"})
+
+        # 6. Memory bandwidth / RAM hierarchy failure -> Local SRAM buffering / banked cache
+        if any("bandwidth" in fc.lower() or "memory" in fc.lower() or "ram" in fc.lower() for fc in failed_constraints):
+            return self.apply_operation(failed_candidate, SearchOperation.CHANGE_MEMORY_ARCHITECTURE, target_spec, extra_params={"focus": "local_sram_buffering"})
 
         # Default fallback mutation
         return self.apply_operation(failed_candidate, SearchOperation.MUTATE, target_spec)

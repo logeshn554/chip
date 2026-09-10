@@ -101,6 +101,19 @@ class TrajectoryDatasetBuilder:
                 logger.debug(f"Invalidating episode {getattr(ep, 'episode_id', '')}: fallback_used is True")
                 continue
 
+            # Issue 47: Held-out benchmark boundary enforcement
+            bench_split = str(meta.get("benchmark_split", "")).lower()
+            if bench_split in ("held_out", "heldout", "test", "eval", "validation"):
+                logger.debug(f"Rejecting episode {getattr(ep, 'episode_id', '')}: held-out split '{bench_split}'")
+                continue
+
+            # Issue 35: Global training-data purity enforcement (only genuine measurements allowed)
+            final_metrics = getattr(ep, "final_metrics", {}) or {}
+            final_verif = getattr(ep, "final_verification", {}) or {}
+            if final_metrics.get("metric_type") == "heuristic" or final_verif.get("metric_type") == "heuristic":
+                logger.debug(f"Rejecting episode {getattr(ep, 'episode_id', '')}: contains heuristic/unmeasured EDA metrics")
+                continue
+
             if ep.final_reward < min_reward:
                 continue
             if require_success and not ep.success:
